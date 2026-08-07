@@ -1082,6 +1082,17 @@ async function renderAll(){
   renderChecklistHint();
   await renderAll();
   if ('serviceWorker' in navigator){
-    navigator.serviceWorker.register('sw.js').catch(() => {});
+    navigator.serviceWorker.register('sw.js').then((reg) => {
+      reg.update(); // explicitly check for a newer sw.js on every app launch
+    }).catch(() => {});
+    // If a new service worker takes over mid-session, reload once so the
+    // page actually reflects it, rather than sitting on stale code until
+    // the next manual relaunch.
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (reloaded) return;
+      reloaded = true;
+      window.location.reload();
+    });
   }
 })();
