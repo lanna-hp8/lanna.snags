@@ -1,11 +1,19 @@
 /* ============================================================
-   STORAGE LAYER — IndexedDB (replaces window.storage from the
-   Claude-hosted version; this runs in a real browser so it has
-   real storage capacity — hundreds of MB to a few GB depending
-   on device/browser).
+   STORAGE LAYER — IndexedDB.
+   Two stores, deliberately kept separate for scalability:
+     - 'snags'  — text data only (room, trade, description, pins).
+                  Small records; fast to list/search/edit regardless
+                  of how many photos exist.
+     - 'photos' — one record per photo (thumb + full-res together),
+                  tagged with snagId via an index. Editing a snag's
+                  text never touches this store; only opening that
+                  specific snag (or exporting) reads its photos.
+   This avoids the old design's problem: every snag record carried
+   its photos embedded inside it, so even a small text edit meant
+   reading/rewriting the photos too.
    ============================================================ */
 const DB_NAME = 'siteSnagDB';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 let dbPromise = null;
 
 function openDB(){
@@ -14,11 +22,51 @@ function openDB(){
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = (e) => {
       const db = e.target.result;
+      const tx = e.target.transaction;
       if (!db.objectStoreNames.contains('snags')) {
         db.createObjectStore('snags', { keyPath: 'id', autoIncrement: true });
       }
       if (!db.objectStoreNames.contains('meta')) {
         db.createObjectStore('meta', { keyPath: 'key' });
+      }
+      let photoStore;
+      if (!db.objectStoreNames.contains('photos')) {
+        photoStore = db.createObjectStore('photos', { keyPath: 'id', autoIncrement: true });
+        photoStore.createIndex('snagId', 'snagId', { unique: false });
+      } else {
+        photoStore = tx.objectStore('photos');
+      }
+      // One-time migration from v1 shape (photos embedded in the snag record,
+      // single pinX/pinY) into the new shape (separate photos store, pins array).
+      if (e.oldVersion < 2) {
+        const snagStore = tx.objectStore('snags');
+        snagStore.openCursor().onsuccess = (ev) => {
+          const cursor = ev.target.result;
+          if (!cursor) return;
+          const item = cursor.value;
+          let changed = false;
+          const thumbs = item.thumbs || [];
+          const fulls = item.photosFull || [];
+          for (let i = 0; i < Math.max(thumbs.length, fulls.length); i++){
+            photoStore.add({ snagId: item.id, thumb: thumbs[i] || null, full: fulls[i] || null, order: i, createdAt: item.createdAt || new Date().toISOString() });
+          }
+          if (thumbs.length || fulls.length){
+            delete item.thumbs;
+            delete item.photosFull;
+            changed = true;
+          }
+          if (item.pinX != null || item.pinY != null){
+            item.pins = [{ x: item.pinX, y: item.pinY }];
+            delete item.pinX;
+            delete item.pinY;
+            changed = true;
+          } else if (!item.pins){
+            item.pins = [];
+            changed = true;
+          }
+          if (changed) cursor.update(item);
+          cursor.continue();
+        };
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -71,6 +119,25 @@ async function getMeta(key, fallback){
 }
 async function setMeta(key, value){
   return idbPut('meta', { key, value });
+}
+
+/* ---- Photos store helpers ---- */
+async function getPhotosForSnag(snagId){
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('photos', 'readonly');
+    const idx = tx.objectStore('photos').index('snagId');
+    const req = idx.getAll(snagId);
+    req.onsuccess = () => resolve((req.result || []).sort((a, b) => (a.order || 0) - (b.order || 0)));
+    req.onerror = () => reject(req.error);
+  });
+}
+async function getAllPhotos(){ return idbGetAll('photos'); }
+async function addPhoto(record){ return idbPut('photos', record); }
+async function deletePhoto(id){ return idbDelete('photos', id); }
+async function deletePhotosForSnag(snagId){
+  const photos = await getPhotosForSnag(snagId);
+  for (const p of photos) await deletePhoto(p.id);
 }
 
 /* ============================================================
@@ -210,9 +277,11 @@ async function blobToUint8Array(blob){
    pattern as the previous version, kept for consistency)
    ============================================================ */
 let currentEditId = null;
-let currentPhotos = [];      // thumbnails (dataURLs) for the modal in progress
-let currentPhotoBlobs = [];  // full-res Blobs, parallel array to currentPhotos
-let currentPinCoord = null;
+let currentPhotos = [];        // thumbnails (dataURLs) for photos already saved to this snag, in this editing session
+let currentPhotosFull = [];    // matching full-res dataURLs, parallel array to currentPhotos
+let currentPhotoIds = [];      // matching existing photo-record ids (null for a photo added in this session, not yet saved)
+let deletedPhotoIds = [];      // existing photo-record ids removed during this editing session, to delete on save
+let currentPinCoords = [];     // ARRAY of {x,y} — a snag can now have multiple pins in a room
 let prefillRoom = null;
 const PIN_ZOOM_IMG_W = 1500, PIN_ZOOM_IMG_H = 1059, PIN_ZOOM_FACTOR = 1.5;
 
@@ -304,8 +373,10 @@ function roomName(floorCode, roomCode){
 function openAddModal(floorCode, roomCode){
   currentEditId = null;
   currentPhotos = [];
-  currentPhotoBlobs = [];
-  currentPinCoord = null;
+  currentPhotosFull = [];
+  currentPhotoIds = [];
+  deletedPhotoIds = [];
+  currentPinCoords = [];
   prefillRoom = floorCode ? { floor: floorCode, room: roomCode } : null;
   document.getElementById('modalTitle').textContent = 'Log a snag';
   document.getElementById('modalTag').textContent = 'New entry — tag assigned on save';
@@ -330,9 +401,12 @@ async function openEditModal(id){
   const item = items.find(i => i.id === id);
   if (!item) return;
   currentEditId = id;
-  currentPhotos = (item.thumbs || []).slice();
-  currentPhotoBlobs = (item.photoBlobs || []).slice();
-  currentPinCoord = (item.pinX != null && item.pinY != null) ? { x: item.pinX, y: item.pinY } : null;
+  const photos = await getPhotosForSnag(id);
+  currentPhotos = photos.map(p => p.thumb);
+  currentPhotosFull = photos.map(p => p.full);
+  currentPhotoIds = photos.map(p => p.id);
+  deletedPhotoIds = [];
+  currentPinCoords = (item.pins || []).slice();
   document.getElementById('modalTitle').textContent = 'Edit snag';
   document.getElementById('modalTag').textContent = item.tag;
   document.getElementById('deleteBtn').style.display = 'inline-block';
@@ -358,51 +432,61 @@ async function saveSnag(){
   const description = document.getElementById('mDescription').value.trim();
   if (!description){ await showAlert('Please add a description of the defect.'); return; }
 
-  const items = await idbGetAll('snags');
+  try{
+    const items = await idbGetAll('snags');
+    let snagId = currentEditId;
 
-  if (currentEditId){
-    const item = items.find(i => i.id === currentEditId);
-    item.floorCode = floorCode;
-    item.roomCode = roomCode;
-    item.trade = document.getElementById('mTrade').value;
-    item.severity = document.getElementById('mSeverity').value;
-    item.status = document.getElementById('mStatus').value;
-    item.location = document.getElementById('mLocation').value.trim();
-    item.description = description;
-    item.comments = document.getElementById('mComments').value.trim();
-    item.thumbs = currentPhotos;
-    item.photoBlobs = currentPhotoBlobs;
-    item.pinX = currentPinCoord ? currentPinCoord.x : null;
-    item.pinY = currentPinCoord ? currentPinCoord.y : null;
-    item.updatedAt = new Date().toISOString();
-    await idbPut('snags', item);
-  } else {
-    const seq = items.filter(i => i.floorCode === floorCode && i.roomCode === roomCode).length + 1;
-    const tag = `${floorCode}-${roomCode}-${String(seq).padStart(2, '0')}`;
-    await idbPut('snags', {
-      tag, floorCode, roomCode,
-      trade: document.getElementById('mTrade').value,
-      severity: document.getElementById('mSeverity').value,
-      status: document.getElementById('mStatus').value,
-      location: document.getElementById('mLocation').value.trim(),
-      description,
-      comments: document.getElementById('mComments').value.trim(),
-      thumbs: currentPhotos,
-      photoBlobs: currentPhotoBlobs,
-      pinX: currentPinCoord ? currentPinCoord.x : null,
-      pinY: currentPinCoord ? currentPinCoord.y : null,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    });
+    if (currentEditId){
+      const item = items.find(i => i.id === currentEditId);
+      item.floorCode = floorCode;
+      item.roomCode = roomCode;
+      item.trade = document.getElementById('mTrade').value;
+      item.severity = document.getElementById('mSeverity').value;
+      item.status = document.getElementById('mStatus').value;
+      item.location = document.getElementById('mLocation').value.trim();
+      item.description = description;
+      item.comments = document.getElementById('mComments').value.trim();
+      item.pins = currentPinCoords;
+      item.updatedAt = new Date().toISOString();
+      await idbPut('snags', item);
+    } else {
+      const seq = items.filter(i => i.floorCode === floorCode && i.roomCode === roomCode).length + 1;
+      const tag = `${floorCode}-${roomCode}-${String(seq).padStart(2, '0')}`;
+      snagId = await idbPut('snags', {
+        tag, floorCode, roomCode,
+        trade: document.getElementById('mTrade').value,
+        severity: document.getElementById('mSeverity').value,
+        status: document.getElementById('mStatus').value,
+        location: document.getElementById('mLocation').value.trim(),
+        description,
+        comments: document.getElementById('mComments').value.trim(),
+        pins: currentPinCoords,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+    }
+
+    // Photos live in their own store, keyed to this snag — only touch the
+    // records that actually changed this session (deletions + new adds).
+    for (const pid of deletedPhotoIds) await deletePhoto(pid);
+    for (let i = 0; i < currentPhotos.length; i++){
+      if (currentPhotoIds[i] == null){ // a newly-added photo this session
+        await addPhoto({ snagId, thumb: currentPhotos[i], full: currentPhotosFull[i], order: i, createdAt: new Date().toISOString() });
+      }
+    }
+
+    closeModal();
+    await renderAll();
+  }catch(e){
+    await showAlert('Could not save this snag: ' + (e && e.message ? e.message : 'unknown storage error') + '. If this keeps happening with photos attached, try removing one photo and saving again — your device may be low on storage.');
   }
-  closeModal();
-  await renderAll();
 }
 
 async function deleteCurrent(){
   if (!currentEditId) return;
   const ok = await showConfirm('Delete this snag entry? This cannot be undone.', 'Delete', true);
   if (!ok) return;
+  await deletePhotosForSnag(currentEditId);
   await idbDelete('snags', currentEditId);
   closeModal();
   await renderAll();
@@ -420,16 +504,26 @@ function handlePhotoInput(evt){
     reader.onload = function(e){
       const img = new Image();
       img.onload = function(){
+        // Thumbnail (small, for quick reference in lists)
         const maxW = 700;
         const scale = Math.min(1, maxW / img.width);
-        const canvas = document.createElement('canvas');
-        canvas.width = img.width * scale;
-        canvas.height = img.height * scale;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
-        currentPhotos.push(dataUrl);
-        currentPhotoBlobs.push(file);   // the ORIGINAL full-resolution file, kept as-is
+        const thumbCanvas = document.createElement('canvas');
+        thumbCanvas.width = img.width * scale;
+        thumbCanvas.height = img.height * scale;
+        thumbCanvas.getContext('2d').drawImage(img, 0, 0, thumbCanvas.width, thumbCanvas.height);
+        const thumbUrl = thumbCanvas.toDataURL('image/jpeg', 0.6);
+
+        // Full-resolution version — same pixel dimensions as the original, re-encoded
+        // as a JPEG string (not a raw Blob) so it stores reliably across browsers.
+        const fullCanvas = document.createElement('canvas');
+        fullCanvas.width = img.width;
+        fullCanvas.height = img.height;
+        fullCanvas.getContext('2d').drawImage(img, 0, 0);
+        const fullUrl = fullCanvas.toDataURL('image/jpeg', 0.9);
+
+        currentPhotos.push(thumbUrl);
+        currentPhotosFull.push(fullUrl);
+        currentPhotoIds.push(null); // null = newly added this session, no stored record yet
         renderPhotoPreview();
       };
       img.src = e.target.result;
@@ -447,7 +541,14 @@ function renderPhotoPreview(){
       <span class="full-tag">full-res</span>
     </div>`).join('');
 }
-function removePhoto(idx){ currentPhotos.splice(idx, 1); currentPhotoBlobs.splice(idx, 1); renderPhotoPreview(); }
+function removePhoto(idx){
+  const existingId = currentPhotoIds[idx];
+  if (existingId != null) deletedPhotoIds.push(existingId);
+  currentPhotos.splice(idx, 1);
+  currentPhotosFull.splice(idx, 1);
+  currentPhotoIds.splice(idx, 1);
+  renderPhotoPreview();
+}
 function openLightbox(src){ document.getElementById('lightboxImg').src = src; document.getElementById('lightbox').classList.add('show'); }
 
 /* ============================================================
@@ -455,8 +556,14 @@ function openLightbox(src){ document.getElementById('lightboxImg').src = src; do
    ============================================================ */
 function applyZoomBackground(el, floorCode, cxPct, cyPct, containerW, containerH, zoomFactor){
   const zoom = zoomFactor || PIN_ZOOM_FACTOR;
-  const scaledW = PIN_ZOOM_IMG_W * zoom;
-  const scaledH = PIN_ZOOM_IMG_H * zoom;
+  // scaledW/H are relative to the CONTAINER's actual pixel size, not the source
+  // image's native pixel size — this is what makes the field of view consistent
+  // across screen sizes. (The old version scaled off the fixed 1500x1059 source
+  // dimensions regardless of how wide the container actually was, so the same
+  // "zoom" number showed a much smaller fraction of the room on a narrow phone
+  // screen than on a wide desktop one — that was the "cutting off the room" bug.)
+  const scaledW = containerW * zoom;
+  const scaledH = containerH * zoom;
   let targetX = (cxPct / 100) * scaledW;
   let targetY = (cyPct / 100) * scaledH;
   targetX = Math.min(Math.max(targetX, containerW / 2), scaledW - containerW / 2);
@@ -470,45 +577,95 @@ function applyZoomBackground(el, floorCode, cxPct, cyPct, containerW, containerH
   el.dataset.posX = posX; el.dataset.posY = posY;
   return { scaledW, scaledH, posX, posY };
 }
+let pinZoomState = null; // caches current floor/room/center so the slider can re-zoom without re-deriving
 async function renderPinZoom(){
   const floorCode = document.getElementById('mFloor').value;
   const roomCode = document.getElementById('mRoom').value;
   const wrap = document.getElementById('pinZoomWrap');
   const hint = document.getElementById('pinZoomHint');
+  const sliderRow = document.getElementById('pinZoomSlider').parentElement;
   if (floorCode === 'WH'){
     wrap.style.display = 'none';
+    sliderRow.style.display = 'none';
     hint.textContent = 'No floor plan available for whole-house / external items.';
+    pinZoomState = null;
     return;
   }
   wrap.style.display = 'block';
+  sliderRow.style.display = 'flex';
   const coords = PIN_COORDS[floorCode] || [];
   const entry = coords.find(c => c[0] === roomCode);
   const centerX = entry ? entry[1] : 50;
   const centerY = entry ? entry[2] : 50;
+  const zoom = getZoomFactor(floorCode, roomCode);
+  pinZoomState = { floorCode, roomCode, centerX, centerY };
+  document.getElementById('pinZoomSlider').value = zoom;
+  document.getElementById('pinZoomValue').textContent = zoom.toFixed(1) + 'x';
+  applyCurrentZoom();
+  const otherCount = await renderOtherPins(floorCode, roomCode);
+  updateZoomHint(otherCount);
+}
+function updateZoomHint(otherCount){
+  const hint = document.getElementById('pinZoomHint');
+  const ownCount = currentPinCoords.length;
+  const parts = [];
+  parts.push(ownCount > 0
+    ? `${ownCount} pin${ownCount > 1 ? 's' : ''} placed for this snag — tap a red pin to remove it, tap elsewhere to add another.`
+    : 'Tap the zoomed view to mark where this is — tap again elsewhere to add more than one point.');
+  if (otherCount > 0) parts.push(`Coloured dots (${otherCount}) show other snags already logged in this room.`);
+  hint.textContent = parts.join(' ');
+}
+function applyCurrentZoom(){
+  if (!pinZoomState) return;
+  const wrap = document.getElementById('pinZoomWrap');
   const rect = wrap.getBoundingClientRect();
   const containerW = rect.width || 320;
   const containerH = rect.height || Math.round(containerW * PIN_ZOOM_IMG_H / PIN_ZOOM_IMG_W);
-  const zoom = getZoomFactor(floorCode, roomCode);
-  applyZoomBackground(wrap, floorCode, centerX, centerY, containerW, containerH, zoom);
-  renderPinMarker();
-  const otherCount = await renderOtherPins(floorCode, roomCode);
-  hint.textContent = otherCount > 0
-    ? `Tap to mark exactly where this is. Coloured dots (${otherCount}) show snags already logged in this room.`
-    : 'Tap the zoomed view to mark exactly where in the room this is.';
+  const zoom = parseFloat(document.getElementById('pinZoomSlider').value) || PIN_ZOOM_FACTOR;
+  applyZoomBackground(wrap, pinZoomState.floorCode, pinZoomState.centerX, pinZoomState.centerY, containerW, containerH, zoom);
+  renderOwnPins();
 }
-function renderPinMarker(){
+function onZoomSliderChange(){
+  const zoom = parseFloat(document.getElementById('pinZoomSlider').value);
+  document.getElementById('pinZoomValue').textContent = zoom.toFixed(1) + 'x';
+  applyCurrentZoom();
+  if (pinZoomState) renderOtherPins(pinZoomState.floorCode, pinZoomState.roomCode).then(updateZoomHint);
+}
+
+/* Own pins — the snag being logged/edited right now. Editable: shown as
+   larger red markers you can tap to remove; tapping empty space adds a new
+   one. A snag can have several, since one defect can span multiple points
+   in a room (e.g. a crack running across two walls). */
+function renderOwnPins(){
   const wrap = document.getElementById('pinZoomWrap');
-  const marker = document.getElementById('pinZoomMarker');
-  if (!currentPinCoord){ marker.style.display = 'none'; return; }
+  wrap.querySelectorAll('.pin-zoom-marker').forEach(el => el.remove());
   const scaledW = parseFloat(wrap.dataset.scaledW || 0);
   const scaledH = parseFloat(wrap.dataset.scaledH || 0);
   const posX = parseFloat(wrap.dataset.posX || 0);
   const posY = parseFloat(wrap.dataset.posY || 0);
-  if (!scaledW || !scaledH){ marker.style.display = 'none'; return; }
-  marker.style.left = ((currentPinCoord.x / 100) * scaledW + posX) + 'px';
-  marker.style.top = ((currentPinCoord.y / 100) * scaledH + posY) + 'px';
-  marker.style.display = 'block';
+  if (!scaledW || !scaledH) return;
+  currentPinCoords.forEach((pin, idx) => {
+    const marker = document.createElement('div');
+    marker.className = 'pin-zoom-marker';
+    marker.style.left = ((pin.x / 100) * scaledW + posX) + 'px';
+    marker.style.top = ((pin.y / 100) * scaledH + posY) + 'px';
+    marker.style.display = 'block';
+    marker.title = 'Tap to remove this pin';
+    marker.addEventListener('click', (e) => {
+      e.stopPropagation();
+      currentPinCoords.splice(idx, 1);
+      renderOwnPins();
+      if (pinZoomState) renderOtherPins(pinZoomState.floorCode, pinZoomState.roomCode).then(updateZoomHint);
+      else updateZoomHint(0);
+    });
+    wrap.appendChild(marker);
+  });
 }
+
+/* Other snags' pins in the same room — reference only, not interactive:
+   a different (severity-based) colour, smaller, and pointer-events:none
+   so they can never be dragged, clicked-to-remove, or otherwise edited
+   from here. */
 async function renderOtherPins(floorCode, roomCode){
   const wrap = document.getElementById('pinZoomWrap');
   wrap.querySelectorAll('.pin-zoom-existing').forEach(el => el.remove());
@@ -518,16 +675,20 @@ async function renderOtherPins(floorCode, roomCode){
   const posY = parseFloat(wrap.dataset.posY || 0);
   if (!scaledW || !scaledH) return 0;
   const items = await idbGetAll('snags');
-  const others = items.filter(i => i.floorCode === floorCode && i.roomCode === roomCode && i.pinX != null && i.id !== currentEditId);
+  const others = items.filter(i => i.floorCode === floorCode && i.roomCode === roomCode && i.id !== currentEditId && (i.pins || []).length);
+  let count = 0;
   others.forEach(it => {
-    const dot = document.createElement('div');
-    dot.className = 'pin-zoom-existing sev-' + it.severity;
-    dot.title = `${it.tag} (${it.status}): ${it.description}`;
-    dot.style.left = ((it.pinX / 100) * scaledW + posX) + 'px';
-    dot.style.top = ((it.pinY / 100) * scaledH + posY) + 'px';
-    wrap.appendChild(dot);
+    (it.pins || []).forEach(pin => {
+      const dot = document.createElement('div');
+      dot.className = 'pin-zoom-existing sev-' + it.severity;
+      dot.title = `${it.tag} (${it.status}): ${it.description}`;
+      dot.style.left = ((pin.x / 100) * scaledW + posX) + 'px';
+      dot.style.top = ((pin.y / 100) * scaledH + posY) + 'px';
+      wrap.appendChild(dot);
+      count++;
+    });
   });
-  return others.length;
+  return count;
 }
 function handlePinZoomClick(evt){
   const wrap = document.getElementById('pinZoomWrap');
@@ -544,10 +705,17 @@ function handlePinZoomClick(evt){
   let yPct = ((clickY - posY) / scaledH) * 100;
   xPct = Math.max(0, Math.min(100, xPct));
   yPct = Math.max(0, Math.min(100, yPct));
-  currentPinCoord = { x: Math.round(xPct * 100) / 100, y: Math.round(yPct * 100) / 100 };
-  renderPinMarker();
+  currentPinCoords.push({ x: Math.round(xPct * 100) / 100, y: Math.round(yPct * 100) / 100 });
+  renderOwnPins();
+  if (pinZoomState) renderOtherPins(pinZoomState.floorCode, pinZoomState.roomCode).then(updateZoomHint);
+  else updateZoomHint(0);
 }
-function clearPinCoord(){ currentPinCoord = null; renderPinMarker(); }
+function clearPinCoord(){
+  currentPinCoords = [];
+  renderOwnPins();
+  if (pinZoomState) renderOtherPins(pinZoomState.floorCode, pinZoomState.roomCode).then(updateZoomHint);
+  else updateZoomHint(0);
+}
 function buildMiniPinStyle(floorCode, roomCode, x, y){
   const containerW = 90, containerH = 64;
   const zoom = getZoomFactor(floorCode, roomCode);
@@ -669,7 +837,8 @@ async function renderList(){
     container.innerHTML = `<div class="empty-state">No snags match these filters yet.</div>`;
     return;
   }
-  container.innerHTML = items.map(i => `
+  const withPhotos = await Promise.all(items.map(async i => ({ item: i, photos: await getPhotosForSnag(i.id) })));
+  container.innerHTML = withPhotos.map(({ item: i, photos }) => `
     <div class="snag-ticket sev-${i.severity}">
       <div class="ticket-top">
         <div><span class="tag-code">${i.tag}</span><span class="badge sev-${i.severity}" style="margin-left:6px;">${i.severity}</span></div>
@@ -678,8 +847,8 @@ async function renderList(){
       <div class="ticket-loc"><b>${roomName(i.floorCode, i.roomCode)}</b> · ${i.trade}${i.location ? ' · ' + i.location : ''}</div>
       <div class="ticket-desc">${escapeHtml(i.description)}</div>
       ${i.comments ? `<div class="ticket-comments">${escapeHtml(i.comments)}</div>` : ''}
-      ${i.pinX != null ? (() => { const p = buildMiniPinStyle(i.floorCode, i.roomCode, i.pinX, i.pinY); return `<div class="ticket-photos"><div class="ticket-pin-mini" style="${p.bg}"><div class="pin-zoom-marker" style="left:${p.markerLeft}px; top:${p.markerTop}px; display:block;"></div></div></div>`; })() : ''}
-      ${i.thumbs && i.thumbs.length ? `<div class="ticket-photos">${i.thumbs.map(p => `<img src="${p}" onclick="openLightbox('${p}')">`).join('')}<span class="ticket-photocount">${i.thumbs.length} photo(s), full-res saved</span></div>` : ''}
+      ${(i.pins && i.pins.length) ? (() => { const p = buildMiniPinStyle(i.floorCode, i.roomCode, i.pins[0].x, i.pins[0].y); const extra = i.pins.length > 1 ? `<span class="ticket-photocount">+${i.pins.length - 1} more pin(s)</span>` : ''; return `<div class="ticket-photos"><div class="ticket-pin-mini" style="${p.bg}"><div class="pin-zoom-marker" style="left:${p.markerLeft}px; top:${p.markerTop}px; display:block; pointer-events:none;"></div></div>${extra}</div>`; })() : ''}
+      ${photos.length ? `<div class="ticket-photos">${photos.map(p => `<img src="${p.thumb}" onclick="openLightbox('${p.full}')">`).join('')}<span class="ticket-photocount">${photos.length} photo(s), full-res saved</span></div>` : ''}
       <div class="ticket-actions">
         <button class="btn small" onclick="openEditModal(${i.id})">Edit</button>
         <select onchange="quickStatus(${i.id}, this.value)">
@@ -711,9 +880,10 @@ async function renderStats(){
   const last = items.slice().sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))[0];
   document.getElementById('lastUpdated').textContent = last ? new Date(last.updatedAt).toLocaleString('en-GB') : 'no entries yet';
 
-  // Approximate photo storage used (sum of full-res blob sizes)
+  // Approximate photo storage used (sum of full-res photo string sizes, from the separate photos store)
+  const allPhotos = await getAllPhotos();
   let totalBytes = 0;
-  items.forEach(i => (i.photoBlobs || []).forEach(b => { if (b && b.size) totalBytes += b.size; }));
+  allPhotos.forEach(p => { if (p.full) totalBytes += Math.round(p.full.length * 0.75); });
   const mb = totalBytes / (1024 * 1024);
   let label = mb < 1 ? Math.round(totalBytes / 1024) + ' KB' : mb.toFixed(mb < 10 ? 2 : 0) + ' MB';
   if (navigator.storage && navigator.storage.estimate){
@@ -734,11 +904,13 @@ async function renderStats(){
 async function exportCSV(){
   const items = await filteredItemsOrAll();
   if (items.length === 0){ await showAlert('No snags to export.'); return; }
-  const headers = ['Tag','Floor','Room','Trade','Severity','Status','Location detail','Description','Comments','Photo count','Logged'];
-  const rows = items.map(i => [
+  const headers = ['Tag','Floor','Room','Trade','Severity','Status','Location detail','Description','Comments','Pin count','Photo count','Logged'];
+  const photoCounts = await Promise.all(items.map(i => getPhotosForSnag(i.id)));
+  const rows = items.map((i, idx) => [
     i.tag, FLOORS.find(f => f.code === i.floorCode).name, roomName(i.floorCode, i.roomCode), i.trade,
     i.severity, i.status, i.location || '', i.description || '', i.comments || '',
-    (i.photoBlobs || []).length,
+    (i.pins || []).length,
+    photoCounts[idx].length,
     new Date(i.createdAt).toLocaleDateString('en-GB')
   ]);
   const csv = [headers, ...rows].map(r => r.map(cell => {
@@ -777,13 +949,15 @@ async function runExport(){
   statusEl.textContent = 'Preparing export...';
 
   // Build the data table (CSV) and a JSON with full detail
-  const headers = ['Tag','Floor','Room','Trade','Severity','Status','Location detail','Description','Comments','PinX','PinY','ThumbFile','PhotoFiles','Logged','Updated'];
+  const headers = ['Tag','Floor','Room','Trade','Severity','Status','Location detail','Description','Comments','Pins','ThumbFiles','PhotoFiles','Logged','Updated'];
   const csvRows = [headers];
   const jsonRecords = [];
 
+  const photosBySnag = await Promise.all(items.map(i => getPhotosForSnag(i.id)));
+
   // Count total files to process for progress bar
-  let totalFiles = items.length; // data file itself counts as part of part 1, but we track photo files mainly
-  items.forEach(i => { totalFiles += (i.thumbs || []).length + (i.photoBlobs || []).length; });
+  let totalFiles = 0;
+  photosBySnag.forEach(photos => { totalFiles += photos.length * 2; }); // thumb + full per photo
   let processed = 0;
 
   let zip = new ZipWriter();
@@ -802,35 +976,37 @@ async function runExport(){
     }
   }
 
-  for (const item of items){
+  for (let itemIdx = 0; itemIdx < items.length; itemIdx++){
+    const item = items[itemIdx];
+    const photos = photosBySnag[itemIdx];
     const thumbFiles = [];
     const photoFiles = [];
-    const thumbs = item.thumbs || [];
-    for (let idx = 0; idx < thumbs.length; idx++){
-      const fname = `photos/${item.tag}_thumb_${idx + 1}.jpg`;
-      await addToZip(fname, dataUrlToUint8Array(thumbs[idx]));
-      thumbFiles.push(fname);
+    for (let idx = 0; idx < photos.length; idx++){
+      if (photos[idx].thumb){
+        const fname = `photos/${item.tag}_thumb_${idx + 1}.jpg`;
+        await addToZip(fname, dataUrlToUint8Array(photos[idx].thumb));
+        thumbFiles.push(fname);
+      }
       processed++;
       progFill.style.width = Math.round((processed / totalFiles) * 100) + '%';
       statusEl.textContent = `Packing photos... (${processed}/${totalFiles})`;
-    }
-    const blobs = item.photoBlobs || [];
-    for (let idx = 0; idx < blobs.length; idx++){
-      const blob = blobs[idx];
-      const ext = (blob.type && blob.type.includes('png')) ? 'png' : 'jpg';
-      const fname = `photos/${item.tag}_full_${idx + 1}.${ext}`;
-      const u8 = await blobToUint8Array(blob);
-      await addToZip(fname, u8);
-      photoFiles.push(fname);
+
+      if (photos[idx].full){
+        const fname = `photos/${item.tag}_full_${idx + 1}.jpg`;
+        await addToZip(fname, dataUrlToUint8Array(photos[idx].full));
+        photoFiles.push(fname);
+      }
       processed++;
       progFill.style.width = Math.round((processed / totalFiles) * 100) + '%';
       statusEl.textContent = `Packing photos... (${processed}/${totalFiles})`;
     }
 
+    const pinsStr = (item.pins || []).map(p => `${p.x},${p.y}`).join('|');
+
     csvRows.push([
       item.tag, FLOORS.find(f => f.code === item.floorCode).name, roomName(item.floorCode, item.roomCode),
       item.trade, item.severity, item.status, item.location || '', item.description || '', item.comments || '',
-      item.pinX != null ? item.pinX : '', item.pinY != null ? item.pinY : '',
+      pinsStr,
       thumbFiles.join('|'), photoFiles.join('|'),
       new Date(item.createdAt).toLocaleString('en-GB'), new Date(item.updatedAt).toLocaleString('en-GB')
     ]);
@@ -840,7 +1016,7 @@ async function runExport(){
       roomCode: item.roomCode, roomName: roomName(item.floorCode, item.roomCode),
       trade: item.trade, severity: item.severity, status: item.status,
       location: item.location || '', description: item.description || '', comments: item.comments || '',
-      pinX: item.pinX, pinY: item.pinY,
+      pins: item.pins || [],
       thumbFiles, photoFiles,
       createdAt: item.createdAt, updatedAt: item.updatedAt
     });

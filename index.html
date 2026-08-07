@@ -133,11 +133,11 @@
   .wh-btn .dot.some{background:var(--amber);} .wh-btn .dot.clear{background:var(--green);}
 
   .pin-zoom-wrap{position:relative; width:100%; aspect-ratio:1500/1059; border-radius:8px; overflow:hidden; border:1px solid var(--line); background:var(--grey-bg); cursor:crosshair; background-repeat:no-repeat;}
-  .pin-zoom-marker{position:absolute; width:20px; height:20px; margin-left:-10px; margin-top:-10px; border-radius:50%; background:var(--red); border:2px solid #fff; box-shadow:0 1px 4px rgba(0,0,0,0.4); pointer-events:none;}
-  .pin-zoom-marker::after{content:""; position:absolute; left:50%; top:50%; width:4px; height:4px; background:#fff; border-radius:50%; transform:translate(-50%,-50%);}
+  .pin-zoom-marker{position:absolute; width:20px; height:20px; margin-left:-10px; margin-top:-10px; border-radius:50%; background:var(--red); border:2px solid #fff; box-shadow:0 1px 4px rgba(0,0,0,0.4); pointer-events:auto; cursor:pointer;}
+  .pin-zoom-marker::after{content:""; position:absolute; left:50%; top:50%; width:4px; height:4px; background:#fff; border-radius:50%; transform:translate(-50%,-50%); pointer-events:none;}
   .pin-zoom-hint{font-size:11px; color:var(--text-soft); margin-top:5px;}
   .ticket-pin-mini{position:relative; width:90px; height:64px; border-radius:6px; overflow:hidden; border:1px solid var(--line); background-repeat:no-repeat; flex-shrink:0;}
-  .ticket-pin-mini .pin-zoom-marker{width:14px; height:14px; margin-left:-7px; margin-top:-7px;}
+  .ticket-pin-mini .pin-zoom-marker{width:14px; height:14px; margin-left:-7px; margin-top:-7px; pointer-events:none; cursor:default;}
   .pin-zoom-existing{position:absolute; width:14px; height:14px; margin-left:-7px; margin-top:-7px; border-radius:50%; border:2px solid #fff; box-shadow:0 1px 3px rgba(0,0,0,0.35); opacity:0.9; pointer-events:none;}
   .pin-zoom-existing.sev-Critical{background:var(--red);} .pin-zoom-existing.sev-Major{background:var(--amber);} .pin-zoom-existing.sev-Minor{background:var(--blue);} .pin-zoom-existing.sev-Cosmetic{background:var(--grey);}
 
@@ -248,9 +248,12 @@
       <div class="field"><label>Room / area</label><select id="mRoom" onchange="renderPinZoom()"></select></div>
     </div>
     <div class="field" id="pinZoomField">
-      <label>Pinpoint on plan (optional) <span class="info-toggle" onclick="clearPinCoord()">clear pin</span></label>
-      <div class="pin-zoom-wrap" id="pinZoomWrap" onclick="handlePinZoomClick(event)">
-        <div class="pin-zoom-marker" id="pinZoomMarker" style="display:none;"></div>
+      <label>Pinpoint on plan (optional — tap to add multiple) <span class="info-toggle" onclick="clearPinCoord()">clear all pins</span></label>
+      <div class="pin-zoom-wrap" id="pinZoomWrap" onclick="handlePinZoomClick(event)"></div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:6px;">
+        <label style="font-size:11px;color:var(--text-soft);white-space:nowrap;">Zoom</label>
+        <input type="range" id="pinZoomSlider" min="1" max="4" step="0.1" value="1.5" oninput="onZoomSliderChange()" style="flex:1;">
+        <span id="pinZoomValue" style="font-size:11px;color:var(--text-soft);width:34px;">1.5x</span>
       </div>
       <div class="pin-zoom-hint" id="pinZoomHint">Tap the zoomed view to mark exactly where in the room this is.</div>
     </div>
@@ -268,7 +271,12 @@
     <div class="field"><label>Comments / notes (optional)</label><textarea id="mComments" placeholder="Extra context"></textarea></div>
     <div class="field">
       <label>Photos — captures both a thumbnail and the full-resolution original</label>
-      <input type="file" accept="image/*" multiple id="mPhotoInput" onchange="handlePhotoInput(event)">
+      <div style="display:flex; gap:8px; margin-bottom:8px;">
+        <button type="button" class="btn small" onclick="document.getElementById('mCameraInput').click()">📷 Take Photo</button>
+        <button type="button" class="btn small" onclick="document.getElementById('mGalleryInput').click()">🖼️ Choose Photos</button>
+      </div>
+      <input type="file" accept="image/*" capture="environment" id="mCameraInput" style="display:none" onchange="handlePhotoInput(event)">
+      <input type="file" accept="image/*" multiple id="mGalleryInput" style="display:none" onchange="handlePhotoInput(event)">
       <div class="photo-row" id="photoPreviewRow"></div>
     </div>
     <div class="modal-actions">
