@@ -426,6 +426,23 @@ async function openEditModal(id){
 }
 function closeModal(){ document.getElementById('overlay').classList.remove('show'); }
 
+async function duplicateToNew(id){
+  const items = await idbGetAll('snags');
+  const item = items.find(i => i.id === id);
+  if (!item) return;
+  // Reuses the normal "add" flow (so photos, photo ids, and pins all start
+  // empty exactly as a fresh snag should) then overlays the text fields from
+  // the source snag. Status resets to Open — a duplicate represents a fresh
+  // occurrence, not a copy of wherever the original currently stands.
+  openAddModal(item.floorCode, item.roomCode);
+  document.getElementById('mTrade').value = item.trade;
+  document.getElementById('mSeverity').value = item.severity;
+  document.getElementById('mStatus').value = 'Open';
+  document.getElementById('mLocation').value = item.location || '';
+  document.getElementById('mDescription').value = item.description || '';
+  document.getElementById('mComments').value = item.comments || '';
+}
+
 async function saveSnag(){
   const floorCode = document.getElementById('mFloor').value;
   const roomCode = document.getElementById('mRoom').value;
@@ -851,6 +868,7 @@ async function renderList(){
       ${photos.length ? `<div class="ticket-photos">${photos.map(p => `<img src="${p.thumb}" onclick="openLightbox('${p.full}')">`).join('')}<span class="ticket-photocount">${photos.length} photo(s), full-res saved</span></div>` : ''}
       <div class="ticket-actions">
         <button class="btn small" onclick="openEditModal(${i.id})">Edit</button>
+        <button class="btn small" onclick="duplicateToNew(${i.id})" title="Start a new snag pre-filled with this one's details — no photos or pins carried over">⎘ Duplicate to new</button>
         <select onchange="quickStatus(${i.id}, this.value)">
           ${['Open','In Progress','Awaiting Parts','Fixed - To Verify','Verified/Closed'].map(s => `<option ${s === i.status ? 'selected' : ''}>${s}</option>`).join('')}
         </select>
