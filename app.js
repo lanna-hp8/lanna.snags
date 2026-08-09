@@ -2,7 +2,7 @@
 // whether your phone is actually running the latest code, since the old
 // "Rev" line was showing the last-edited-snag time (which is per-device
 // data, not a code version) and was misleading for that purpose.
-const APP_BUILD = 'Build v6 — 9 Aug 2026';
+const APP_BUILD = 'Build v7 — 9 Aug 2026';
 
 /* ============================================================
    STORAGE LAYER — IndexedDB.
@@ -781,6 +781,40 @@ function buildMiniPinStyle(floorCode, roomCode, x, y){
   return { bg, markerLeft, markerTop };
 }
 
+/* Tapping the small pin-location preview on a ticket expands it — same idea
+   as tapping a photo thumbnail to see it full-size. Shows ALL of that
+   snag's pins (not just the first one used for the mini preview), read-only. */
+async function getSnagById(id){
+  const items = await idbGetAll('snags');
+  return items.find(i => i.id === id);
+}
+async function openPinLightbox(id){
+  const item = await getSnagById(id);
+  if (!item || !item.pins || !item.pins.length) return;
+  const overlay = document.getElementById('pinLightbox');
+  const wrap = document.getElementById('pinLightboxWrap');
+  overlay.classList.add('show');
+  const coords = PIN_COORDS[item.floorCode] || [];
+  const entry = coords.find(c => c[0] === item.roomCode);
+  const centerX = entry ? entry[1] : 50;
+  const centerY = entry ? entry[2] : 50;
+  const zoom = getZoomFactor(item.floorCode, item.roomCode);
+  const rect = await waitForLayout(wrap); // same layout-safe wait as the picker — avoids the "measured before laid out" bug
+  const containerW = rect.width || 320;
+  const containerH = rect.height || Math.round(containerW * PIN_ZOOM_IMG_H / PIN_ZOOM_IMG_W);
+  const { scaledW, scaledH, posX, posY } = applyZoomBackground(wrap, item.floorCode, centerX, centerY, containerW, containerH, zoom);
+  wrap.querySelectorAll('.pin-zoom-marker').forEach(el => el.remove());
+  item.pins.forEach(pin => {
+    const marker = document.createElement('div');
+    marker.className = 'pin-zoom-marker';
+    marker.style.left = ((pin.x / 100) * scaledW + posX) + 'px';
+    marker.style.top = ((pin.y / 100) * scaledH + posY) + 'px';
+    marker.style.display = 'block';
+    marker.style.pointerEvents = 'none'; // read-only view — no editing from here
+    wrap.appendChild(marker);
+  });
+}
+
 /* ============================================================
    FLOOR PLAN TAB
    ============================================================ */
@@ -892,11 +926,18 @@ function escapeHtml(s){ return (s || '').replace(/[&<>"']/g, m => ({'&':'&amp;',
 
 let showAllRequested = false;
 function showAllSnags(){ showAllRequested = true; renderList(); }
+function performSearch(){
+  // Explicit action: filters/search no longer trigger on every keystroke or
+  // dropdown change — pressing Search (or Enter in the search box) is what
+  // actually clears whatever was showing and runs the query fresh.
+  showAllRequested = false;
+  renderList();
+}
 
 async function renderList(){
   const container = document.getElementById('listContainer');
   if (!hasActiveFilter() && !showAllRequested){
-    container.innerHTML = `<div class="empty-state">Pick a filter above (floor, trade, severity, status) or type a search to show matching snags — keeps things fast with a large list.<br><br><button class="btn" onclick="showAllSnags()">Show every snag anyway</button></div>`;
+    container.innerHTML = `<div class="empty-state">Pick a filter above (floor, trade, severity, status) and/or type a search, then tap Search — keeps things fast with a large list.<br><br><button class="btn" onclick="showAllSnags()">Show every snag anyway</button></div>`;
     return;
   }
   const items = await filteredItems();
@@ -914,7 +955,7 @@ async function renderList(){
       <div class="ticket-loc"><b>${roomName(i.floorCode, i.roomCode)}</b> · ${i.trade}${i.location ? ' · ' + i.location : ''}</div>
       <div class="ticket-desc">${escapeHtml(i.description)}</div>
       ${i.comments ? `<div class="ticket-comments">${escapeHtml(i.comments)}</div>` : ''}
-      ${(i.pins && i.pins.length) ? (() => { const p = buildMiniPinStyle(i.floorCode, i.roomCode, i.pins[0].x, i.pins[0].y); const extra = i.pins.length > 1 ? `<span class="ticket-photocount">+${i.pins.length - 1} more pin(s)</span>` : ''; return `<div class="ticket-photos"><div class="ticket-pin-mini" style="${p.bg}"><div class="pin-zoom-marker" style="left:${p.markerLeft}px; top:${p.markerTop}px; display:block; pointer-events:none;"></div></div>${extra}</div>`; })() : ''}
+      ${(i.pins && i.pins.length) ? (() => { const p = buildMiniPinStyle(i.floorCode, i.roomCode, i.pins[0].x, i.pins[0].y); const extra = i.pins.length > 1 ? `<span class="ticket-photocount">+${i.pins.length - 1} more pin(s)</span>` : ''; return `<div class="ticket-photos"><div class="ticket-pin-mini" style="${p.bg}" onclick="openPinLightbox(${i.id})" title="Tap to see where this is on the floor plan"><div class="pin-zoom-marker" style="left:${p.markerLeft}px; top:${p.markerTop}px; display:block; pointer-events:none;"></div></div>${extra}</div>`; })() : ''}
       ${photos.length ? `<div class="ticket-photos">${photos.map(p => `<img src="${p.thumb}" onclick="openLightbox('${p.full}')">`).join('')}<span class="ticket-photocount">${photos.length} photo(s), full-res saved</span></div>` : ''}
       <div class="ticket-actions">
         <button class="btn small" onclick="openEditModal(${i.id})">Edit</button>

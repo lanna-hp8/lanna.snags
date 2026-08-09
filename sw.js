@@ -1,4 +1,4 @@
-const CACHE_NAME = 'site-snag-register-v6';
+const CACHE_NAME = 'site-snag-register-v7';
 const CORE_ASSETS = [
   './',
   './index.html',

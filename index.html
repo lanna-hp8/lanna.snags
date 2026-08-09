@@ -136,7 +136,7 @@
   .pin-zoom-marker{position:absolute; width:20px; height:20px; margin-left:-10px; margin-top:-10px; border-radius:50%; background:var(--red); border:2px solid #fff; box-shadow:0 1px 4px rgba(0,0,0,0.4); pointer-events:auto; cursor:pointer;}
   .pin-zoom-marker::after{content:""; position:absolute; left:50%; top:50%; width:4px; height:4px; background:#fff; border-radius:50%; transform:translate(-50%,-50%); pointer-events:none;}
   .pin-zoom-hint{font-size:11px; color:var(--text-soft); margin-top:5px;}
-  .ticket-pin-mini{position:relative; width:90px; height:64px; border-radius:6px; overflow:hidden; border:1px solid var(--line); background-repeat:no-repeat; flex-shrink:0;}
+  .ticket-pin-mini{position:relative; width:90px; height:64px; border-radius:6px; overflow:hidden; border:1px solid var(--line); background-repeat:no-repeat; flex-shrink:0; cursor:pointer;}
   .ticket-pin-mini .pin-zoom-marker{width:14px; height:14px; margin-left:-7px; margin-top:-7px; pointer-events:none; cursor:default;}
   .pin-zoom-existing{position:absolute; width:14px; height:14px; margin-left:-7px; margin-top:-7px; border-radius:50%; border:2px solid #fff; box-shadow:0 1px 3px rgba(0,0,0,0.35); opacity:0.9; pointer-events:none;}
   .pin-zoom-existing.sev-Critical{background:var(--red);} .pin-zoom-existing.sev-Major{background:var(--amber);} .pin-zoom-existing.sev-Minor{background:var(--blue);} .pin-zoom-existing.sev-Cosmetic{background:var(--grey);}
@@ -198,12 +198,13 @@
     <div class="toolbar">
       <button class="btn primary" onclick="openAddModal()">+ Log a snag</button>
       <div class="filters">
-        <select id="fFloor" onchange="renderList()"><option value="">All floors</option></select>
-        <select id="fTrade" onchange="renderList()"><option value="">All trades</option></select>
-        <select id="fSeverity" onchange="renderList()"><option value="">All severities</option></select>
-        <select id="fStatus" onchange="renderList()"><option value="">All statuses</option></select>
+        <select id="fFloor"><option value="">All floors</option></select>
+        <select id="fTrade"><option value="">All trades</option></select>
+        <select id="fSeverity"><option value="">All severities</option></select>
+        <select id="fStatus"><option value="">All statuses</option></select>
       </div>
-      <div class="search-box"><input type="search" id="fSearch" placeholder="Search..." oninput="renderList()"></div>
+      <div class="search-box"><input type="search" id="fSearch" placeholder="Search..." onkeydown="if(event.key==='Enter'){performSearch();}"></div>
+      <button class="btn primary" onclick="performSearch()">🔍 Search</button>
     </div>
     <div id="listContainer"></div>
   </div>
@@ -291,6 +292,10 @@
 
 <div class="overlay" id="lightbox" onclick="this.classList.remove('show')">
   <img id="lightboxImg" style="max-width:90%;max-height:90%;border-radius:8px;margin:auto;">
+</div>
+
+<div class="overlay" id="pinLightbox" onclick="this.classList.remove('show')">
+  <div class="pin-zoom-wrap" id="pinLightboxWrap" style="max-width:640px; width:92vw; margin:auto; cursor:default; box-shadow:0 20px 60px rgba(22,35,62,0.4);"></div>
 </div>
 
 <div class="overlay" id="confirmOverlay">
