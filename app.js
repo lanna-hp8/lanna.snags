@@ -2,7 +2,7 @@
 // whether your phone is actually running the latest code, since the old
 // "Rev" line was showing the last-edited-snag time (which is per-device
 // data, not a code version) and was misleading for that purpose.
-const APP_BUILD = 'Build v7 — 9 Aug 2026';
+const APP_BUILD = 'Build v8 — 9 Aug 2026';
 
 /* ============================================================
    STORAGE LAYER — IndexedDB.
@@ -783,11 +783,16 @@ function buildMiniPinStyle(floorCode, roomCode, x, y){
 
 /* Tapping the small pin-location preview on a ticket expands it — same idea
    as tapping a photo thumbnail to see it full-size. Shows ALL of that
-   snag's pins (not just the first one used for the mini preview), read-only. */
+   snag's pins (not just the first one used for the mini preview), read-only.
+   Defaults to a zoomed-OUT view (1x, our minimum) rather than the picker's
+   per-room preset — that preset is tuned for precisely placing a pin up
+   close, which made pins look oversized here where the point is spatial
+   context. A slider still lets you zoom in if you want a closer look. */
 async function getSnagById(id){
   const items = await idbGetAll('snags');
   return items.find(i => i.id === id);
 }
+let pinLightboxState = null;
 async function openPinLightbox(id){
   const item = await getSnagById(id);
   if (!item || !item.pins || !item.pins.length) return;
@@ -798,13 +803,22 @@ async function openPinLightbox(id){
   const entry = coords.find(c => c[0] === item.roomCode);
   const centerX = entry ? entry[1] : 50;
   const centerY = entry ? entry[2] : 50;
-  const zoom = getZoomFactor(item.floorCode, item.roomCode);
+  pinLightboxState = { floorCode: item.floorCode, roomCode: item.roomCode, centerX, centerY, pins: item.pins };
+  const slider = document.getElementById('pinLightboxSlider');
+  slider.value = 1; // always start fully zoomed out here, regardless of the picker's per-room preset
+  document.getElementById('pinLightboxZoomValue').textContent = '1.0x';
+  await renderPinLightboxZoom();
+}
+async function renderPinLightboxZoom(){
+  if (!pinLightboxState) return;
+  const wrap = document.getElementById('pinLightboxWrap');
+  const zoom = parseFloat(document.getElementById('pinLightboxSlider').value) || 1;
   const rect = await waitForLayout(wrap); // same layout-safe wait as the picker — avoids the "measured before laid out" bug
   const containerW = rect.width || 320;
   const containerH = rect.height || Math.round(containerW * PIN_ZOOM_IMG_H / PIN_ZOOM_IMG_W);
-  const { scaledW, scaledH, posX, posY } = applyZoomBackground(wrap, item.floorCode, centerX, centerY, containerW, containerH, zoom);
+  const { scaledW, scaledH, posX, posY } = applyZoomBackground(wrap, pinLightboxState.floorCode, pinLightboxState.centerX, pinLightboxState.centerY, containerW, containerH, zoom);
   wrap.querySelectorAll('.pin-zoom-marker').forEach(el => el.remove());
-  item.pins.forEach(pin => {
+  pinLightboxState.pins.forEach(pin => {
     const marker = document.createElement('div');
     marker.className = 'pin-zoom-marker';
     marker.style.left = ((pin.x / 100) * scaledW + posX) + 'px';
@@ -813,6 +827,11 @@ async function openPinLightbox(id){
     marker.style.pointerEvents = 'none'; // read-only view — no editing from here
     wrap.appendChild(marker);
   });
+}
+function onPinLightboxZoomChange(){
+  const zoom = parseFloat(document.getElementById('pinLightboxSlider').value);
+  document.getElementById('pinLightboxZoomValue').textContent = zoom.toFixed(1) + 'x';
+  renderPinLightboxZoom();
 }
 
 /* ============================================================
