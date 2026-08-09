@@ -2,7 +2,7 @@
 // whether your phone is actually running the latest code, since the old
 // "Rev" line was showing the last-edited-snag time (which is per-device
 // data, not a code version) and was misleading for that purpose.
-const APP_BUILD = 'Build v4 — 9 Aug 2026';
+const APP_BUILD = 'Build v6 — 9 Aug 2026';
 
 /* ============================================================
    STORAGE LAYER — IndexedDB.
@@ -606,6 +606,27 @@ function applyZoomBackground(el, floorCode, cxPct, cyPct, containerW, containerH
   el.dataset.posX = posX; el.dataset.posY = posY;
   return { scaledW, scaledH, posX, posY };
 }
+// Waits for the pin-zoom container to actually have a real, laid-out size
+// before we do any positioning math against it. Without this, opening the
+// modal could measure the container before the browser finished laying it
+// out (0px), silently falling back to a guessed width — harmless for a new
+// snag with no pins yet, but for an EXISTING snag its pins would render
+// using that wrong guess and never self-correct. This polls across a few
+// animation frames until a real width shows up.
+function waitForLayout(el, maxFrames){
+  maxFrames = maxFrames || 15;
+  return new Promise((resolve) => {
+    function check(n){
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 || n >= maxFrames){
+        resolve(rect);
+      } else {
+        requestAnimationFrame(() => check(n + 1));
+      }
+    }
+    check(0);
+  });
+}
 let pinZoomState = null; // caches current floor/room/center so the slider can re-zoom without re-deriving
 async function renderPinZoom(){
   const floorCode = document.getElementById('mFloor').value;
@@ -630,7 +651,7 @@ async function renderPinZoom(){
   pinZoomState = { floorCode, roomCode, centerX, centerY };
   document.getElementById('pinZoomSlider').value = zoom;
   document.getElementById('pinZoomValue').textContent = zoom.toFixed(1) + 'x';
-  applyCurrentZoom();
+  await applyCurrentZoom();
   const otherCount = await renderOtherPins(floorCode, roomCode);
   updateZoomHint(otherCount);
 }
@@ -644,20 +665,20 @@ function updateZoomHint(otherCount){
   if (otherCount > 0) parts.push(`Coloured dots (${otherCount}) show other snags already logged in this room.`);
   hint.textContent = parts.join(' ');
 }
-function applyCurrentZoom(){
+async function applyCurrentZoom(){
   if (!pinZoomState) return;
   const wrap = document.getElementById('pinZoomWrap');
-  const rect = wrap.getBoundingClientRect();
+  const rect = await waitForLayout(wrap);
   const containerW = rect.width || 320;
   const containerH = rect.height || Math.round(containerW * PIN_ZOOM_IMG_H / PIN_ZOOM_IMG_W);
   const zoom = parseFloat(document.getElementById('pinZoomSlider').value) || PIN_ZOOM_FACTOR;
   applyZoomBackground(wrap, pinZoomState.floorCode, pinZoomState.centerX, pinZoomState.centerY, containerW, containerH, zoom);
   renderOwnPins();
 }
-function onZoomSliderChange(){
+async function onZoomSliderChange(){
   const zoom = parseFloat(document.getElementById('pinZoomSlider').value);
   document.getElementById('pinZoomValue').textContent = zoom.toFixed(1) + 'x';
-  applyCurrentZoom();
+  await applyCurrentZoom();
   if (pinZoomState) renderOtherPins(pinZoomState.floorCode, pinZoomState.roomCode).then(updateZoomHint);
 }
 
