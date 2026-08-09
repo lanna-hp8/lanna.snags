@@ -16,6 +16,7 @@ const FLOORS = [
     ['BD5','Bedroom 5'],
     ['FBA','Family Bathroom (Bed 4 & 5)'],
     ['PLD','Plant & Data Room'],
+    ['BST','Bedroom 3 Storage'],
     ['STD','Study'],
     ['BL1','Balcony'],
     ['SPD','Spiral Landing'],['FHL','First Floor Hallway'],['FLD','First Floor Landing']
@@ -101,6 +102,7 @@ const PIN_COORDS = {
     ['BD3',42.66,38.98],
     ['EN3',33.92,40.33],
     ['PLD',27.45,40.71],
+    ['BST',35.27,27.19],
     ['BD4',44.5,59.54],
     ['D4',38.64,64.46],
     ['FBA',38.99,57.41],

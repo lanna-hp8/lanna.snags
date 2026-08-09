@@ -1,3 +1,9 @@
+// Bump this on every deployed change — it's the one reliable way to tell
+// whether your phone is actually running the latest code, since the old
+// "Rev" line was showing the last-edited-snag time (which is per-device
+// data, not a code version) and was misleading for that purpose.
+const APP_BUILD = 'Build v4 — 9 Aug 2026';
+
 /* ============================================================
    STORAGE LAYER — IndexedDB.
    Two stores, deliberately kept separate for scalability:
@@ -348,17 +354,23 @@ function toggleChecklist(){ renderChecklistHint(); document.getElementById('chec
 /* ============================================================
    TABS
    ============================================================ */
+let activeTab = 'plan';
 document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
-    if (btn.dataset.tab === 'list') renderList();
-    if (btn.dataset.tab === 'coverage') renderCoverage();
-    if (btn.dataset.tab === 'plan') renderPlanTab();
+    activeTab = btn.dataset.tab;
+    renderActiveTab();
   });
 });
+function renderActiveTab(){
+  if (activeTab === 'list') renderList();
+  if (activeTab === 'coverage') renderCoverage();
+  if (activeTab === 'plan') renderPlanTab();
+  // 'export' tab has no data render — it only acts when you tap the export buttons
+}
 
 /* ============================================================
    MODAL — open/edit/save/delete
@@ -837,19 +849,36 @@ async function filteredItems(){
     if (fs && i.severity !== fs) return false;
     if (fst && i.status !== fst) return false;
     if (q){
-      const hay = (i.tag + ' ' + roomName(i.floorCode, i.roomCode) + ' ' + i.description + ' ' + (i.comments||'') + ' ' + i.trade).toLowerCase();
+      // Search every text field on the snag — tag, floor, room, trade,
+      // severity, status, location, description, comments.
+      const hay = [
+        i.tag, FLOORS.find(f => f.code === i.floorCode)?.name, roomName(i.floorCode, i.roomCode),
+        i.trade, i.severity, i.status, i.location, i.description, i.comments
+      ].filter(Boolean).join(' ').toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
   }).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 }
+function hasActiveFilter(){
+  return !!(document.getElementById('fFloor').value || document.getElementById('fTrade').value ||
+    document.getElementById('fSeverity').value || document.getElementById('fStatus').value ||
+    document.getElementById('fSearch').value.trim());
+}
 const STATUS_CLASS_MAP = { 'Open':'st-open','In Progress':'st-inprogress','Awaiting Parts':'st-awaiting','Fixed - To Verify':'st-tofix','Verified/Closed':'st-verified' };
 function statusClass(s){ return STATUS_CLASS_MAP[s] || 'st-open'; }
 function escapeHtml(s){ return (s || '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 
+let showAllRequested = false;
+function showAllSnags(){ showAllRequested = true; renderList(); }
+
 async function renderList(){
-  const items = await filteredItems();
   const container = document.getElementById('listContainer');
+  if (!hasActiveFilter() && !showAllRequested){
+    container.innerHTML = `<div class="empty-state">Pick a filter above (floor, trade, severity, status) or type a search to show matching snags — keeps things fast with a large list.<br><br><button class="btn" onclick="showAllSnags()">Show every snag anyway</button></div>`;
+    return;
+  }
+  const items = await filteredItems();
   if (items.length === 0){
     container.innerHTML = `<div class="empty-state">No snags match these filters yet.</div>`;
     return;
@@ -1072,12 +1101,17 @@ async function runExport(){
    INIT
    ============================================================ */
 async function renderAll(){
+  // Only the stats bar always refreshes (cheap — just counts). The heavy
+  // per-tab renders (especially the Snag List, which loads photos) only
+  // run for whichever tab is actually visible right now — previously
+  // every save/status-change re-rendered all four tabs regardless of
+  // which one you were looking at, which is why things got sluggish as
+  // the photo count grew.
   await renderStats();
-  await renderPlanTab();
-  await renderCoverage();
-  await renderList();
+  await renderActiveTab();
 }
 (async function init(){
+  document.getElementById('buildLabel').textContent = APP_BUILD;
   populateFloorSelects();
   renderChecklistHint();
   await renderAll();
