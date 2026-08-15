@@ -2,7 +2,7 @@
 // whether your phone is actually running the latest code, since the old
 // "Rev" line was showing the last-edited-snag time (which is per-device
 // data, not a code version) and was misleading for that purpose.
-const APP_BUILD = 'Build v8 — 9 Aug 2026';
+const APP_BUILD = 'Build v9 — 9 Aug 2026';
 
 /* ============================================================
    STORAGE LAYER — IndexedDB.
@@ -336,6 +336,24 @@ function populateFloorSelects(){
   ['Critical','Major','Minor','Cosmetic'].forEach(s => fSeverity.insertAdjacentHTML('beforeend', `<option value="${s}">${s}</option>`));
   ['Open','In Progress','Awaiting Parts','Fixed - To Verify','Verified/Closed'].forEach(s => fStatus.insertAdjacentHTML('beforeend', `<option value="${s}">${s}</option>`));
   populateRoomSelect();
+  populateRoomFilterSelect();
+}
+function populateRoomFilterSelect(){
+  const fFloor = document.getElementById('fFloor');
+  const fRoom = document.getElementById('fRoom');
+  const prevValue = fRoom.value;
+  if (!fFloor.value){
+    // No floor chosen — room filter isn't meaningful yet, so just offer every
+    // room across every floor rather than nothing (still useful for search).
+    const allRooms = [];
+    FLOORS.forEach(f => f.rooms.forEach(r => allRooms.push([r[0], `${r[1]} (${f.name})`])));
+    fRoom.innerHTML = '<option value="">All rooms</option>' + allRooms.map(r => `<option value="${r[0]}">${r[1]}</option>`).join('');
+  } else {
+    const floor = FLOORS.find(f => f.code === fFloor.value);
+    fRoom.innerHTML = '<option value="">All rooms</option>' + (floor ? floor.rooms.map(r => `<option value="${r[0]}">${r[1]}</option>`).join('') : '');
+  }
+  // Keep the previous room selection if it's still a valid option for the new floor
+  if ([...fRoom.options].some(o => o.value === prevValue)) fRoom.value = prevValue;
 }
 function populateRoomSelect(){
   const mFloor = document.getElementById('mFloor');
@@ -913,29 +931,36 @@ async function renderCoverage(){
 async function filteredItems(){
   const items = await idbGetAll('snags');
   const ff = document.getElementById('fFloor').value;
+  const fr = document.getElementById('fRoom').value;
   const ft = document.getElementById('fTrade').value;
   const fs = document.getElementById('fSeverity').value;
   const fst = document.getElementById('fStatus').value;
-  const q = document.getElementById('fSearch').value.trim().toLowerCase();
+  const qWords = document.getElementById('fSearch').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
   return items.filter(i => {
     if (ff && i.floorCode !== ff) return false;
+    if (fr && i.roomCode !== fr) return false;
     if (ft && i.trade !== ft) return false;
     if (fs && i.severity !== fs) return false;
     if (fst && i.status !== fst) return false;
-    if (q){
+    if (qWords.length){
       // Search every text field on the snag — tag, floor, room, trade,
-      // severity, status, location, description, comments.
+      // severity, status, location, description, comments. Each word you
+      // type must partially match SOMEWHERE in that combined text (AND
+      // across words, partial/substring match per word) — e.g. "crack
+      // kitch" matches a kitchen snag mentioning "cracked" even though
+      // neither word is a full/exact match on its own.
       const hay = [
         i.tag, FLOORS.find(f => f.code === i.floorCode)?.name, roomName(i.floorCode, i.roomCode),
         i.trade, i.severity, i.status, i.location, i.description, i.comments
       ].filter(Boolean).join(' ').toLowerCase();
-      if (!hay.includes(q)) return false;
+      if (!qWords.every(w => hay.includes(w))) return false;
     }
     return true;
   }).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 }
 function hasActiveFilter(){
-  return !!(document.getElementById('fFloor').value || document.getElementById('fTrade').value ||
+  return !!(document.getElementById('fFloor').value || document.getElementById('fRoom').value ||
+    document.getElementById('fTrade').value ||
     document.getElementById('fSeverity').value || document.getElementById('fStatus').value ||
     document.getElementById('fSearch').value.trim());
 }

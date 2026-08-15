@@ -198,7 +198,8 @@
     <div class="toolbar">
       <button class="btn primary" onclick="openAddModal()">+ Log a snag</button>
       <div class="filters">
-        <select id="fFloor"><option value="">All floors</option></select>
+        <select id="fFloor" onchange="populateRoomFilterSelect()"><option value="">All floors</option></select>
+        <select id="fRoom"><option value="">All rooms</option></select>
         <select id="fTrade"><option value="">All trades</option></select>
         <select id="fSeverity"><option value="">All severities</option></select>
         <select id="fStatus"><option value="">All statuses</option></select>
