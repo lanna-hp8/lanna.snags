@@ -2,7 +2,7 @@
 // whether your phone is actually running the latest code, since the old
 // "Rev" line was showing the last-edited-snag time (which is per-device
 // data, not a code version) and was misleading for that purpose.
-const APP_BUILD = 'Build #11';
+const APP_BUILD = 'Build #13';
 
 /* ============================================================
    STORAGE LAYER — IndexedDB.
