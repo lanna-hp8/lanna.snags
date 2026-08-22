@@ -170,6 +170,11 @@
     </div>
   </header>
 
+  <div id="backupReminder" style="display:none; background:var(--amber-bg); border:1px solid var(--amber); border-radius:8px; padding:11px 16px; margin:14px 0 0; font-size:13px; color:#7a5416; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+    <span id="backupReminderText"></span>
+    <button class="btn small" style="background:var(--amber); color:#fff; border-color:var(--amber);" onclick="document.querySelector('[data-tab=export]').click()">Go to Export</button>
+  </div>
+
   <nav class="tabs">
     <button class="tab-btn active" data-tab="plan">Floor Plan</button>
     <button class="tab-btn" data-tab="coverage">Coverage</button>
@@ -236,6 +241,13 @@
       <h3>Quick CSV only</h3>
       <p style="margin:0 0 10px;font-size:12.5px;color:var(--text-soft)">Just the data table, no photos — useful for a quick working punch list.</p>
       <button class="btn" onclick="exportCSV()">⬇ Export CSV</button>
+    </div>
+    <div class="export-box">
+      <h3>Restore from backup</h3>
+      <p style="margin:0 0 10px;font-size:12.5px;color:var(--text-soft)">Select one or more backup ZIPs from a previous export to recreate their snags, pins, and photos here. Nothing already in the app is touched or overwritten — this only adds. Files are read directly from your phone; nothing is uploaded anywhere. If a backup was split into several parts, select them all together.</p>
+      <input type="file" accept=".zip" multiple id="importInput" onchange="importBackupFiles(this.files)">
+      <div class="progress-bar" id="importProgressWrap" style="display:none;"><div class="fill" id="importProgressFill"></div></div>
+      <div id="importStatus" style="font-size:12px;color:var(--text-soft);margin-top:8px;"></div>
     </div>
   </div>
 

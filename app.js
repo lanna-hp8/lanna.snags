@@ -2,7 +2,7 @@
 // whether your phone is actually running the latest code, since the old
 // "Rev" line was showing the last-edited-snag time (which is per-device
 // data, not a code version) and was misleading for that purpose.
-const APP_BUILD = 'Build #13';
+const APP_BUILD = 'Build #14';
 
 /* ============================================================
    STORAGE LAYER — IndexedDB.
@@ -276,6 +276,87 @@ function dataUrlToUint8Array(dataUrl){
 async function blobToUint8Array(blob){
   const buf = await blob.arrayBuffer();
   return new Uint8Array(buf);
+}
+function uint8ArrayToDataUrl(u8, mime){
+  mime = mime || 'image/jpeg';
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < u8.length; i += chunkSize){
+    binary += String.fromCharCode.apply(null, u8.subarray(i, i + chunkSize));
+  }
+  return `data:${mime};base64,` + btoa(binary);
+}
+
+/* ============================================================
+   MINIMAL ZIP READER — counterpart to ZipWriter above, for restoring
+   from a backup export. Reads the central directory, then extracts
+   individual entries on demand (STORE or DEFLATE, matching what
+   ZipWriter can produce).
+   ============================================================ */
+async function readZipFile(arrayBuffer){
+  const view = new DataView(arrayBuffer);
+  const bytes = new Uint8Array(arrayBuffer);
+  const EOCD_SIG = 0x06054b50;
+  let eocdOffset = -1;
+  const searchStart = Math.max(0, bytes.length - 22 - 65557);
+  for (let i = bytes.length - 22; i >= searchStart; i--){
+    if (view.getUint32(i, true) === EOCD_SIG){ eocdOffset = i; break; }
+  }
+  if (eocdOffset === -1) throw new Error('Not a valid ZIP file — could not find its end-of-central-directory record.');
+  const totalEntries = view.getUint16(eocdOffset + 10, true);
+  const centralDirOffset = view.getUint32(eocdOffset + 16, true);
+
+  const entries = [];
+  let offset = centralDirOffset;
+  const CENTRAL_SIG = 0x02014b50;
+  for (let i = 0; i < totalEntries; i++){
+    if (view.getUint32(offset, true) !== CENTRAL_SIG) throw new Error('This ZIP\u2019s central directory looks corrupted.');
+    const method = view.getUint16(offset + 10, true);
+    const compSize = view.getUint32(offset + 20, true);
+    const nameLen = view.getUint16(offset + 28, true);
+    const extraLen = view.getUint16(offset + 30, true);
+    const commentLen = view.getUint16(offset + 32, true);
+    const localHeaderOffset = view.getUint32(offset + 42, true);
+    const nameBytes = bytes.slice(offset + 46, offset + 46 + nameLen);
+    const name = new TextDecoder().decode(nameBytes);
+    entries.push({ name, method, compSize, localHeaderOffset });
+    offset += 46 + nameLen + extraLen + commentLen;
+  }
+  return { bytes, view, entries };
+}
+async function extractZipEntry(zip, entry){
+  const { bytes, view } = zip;
+  const off = entry.localHeaderOffset;
+  const LOCAL_SIG = 0x04034b50;
+  if (view.getUint32(off, true) !== LOCAL_SIG) throw new Error('Corrupt local file header for ' + entry.name);
+  const nameLen = view.getUint16(off + 26, true);
+  const extraLen = view.getUint16(off + 28, true);
+  const dataStart = off + 30 + nameLen + extraLen;
+  const compData = bytes.slice(dataStart, dataStart + entry.compSize);
+  if (entry.method === 0) return compData;
+  if (entry.method === 8){
+    if (typeof DecompressionStream === 'undefined'){
+      throw new Error('This browser can\u2019t decompress this ZIP. Try again in an up-to-date Chrome or Safari.');
+    }
+    const ds = new DecompressionStream('deflate-raw');
+    const writer = ds.writable.getWriter();
+    writer.write(compData);
+    writer.close();
+    const reader = ds.readable.getReader();
+    const chunks = [];
+    let total = 0;
+    while (true){
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      total += value.length;
+    }
+    const out = new Uint8Array(total);
+    let o = 0;
+    for (const c of chunks){ out.set(c, o); o += c.length; }
+    return out;
+  }
+  throw new Error('Unsupported compression method in ZIP entry: ' + entry.name);
 }
 
 /* ============================================================
@@ -1082,6 +1163,100 @@ async function filteredItemsOrAll(){
 }
 
 /* ============================================================
+   RESTORE FROM BACKUP — reads one or more export ZIPs (chosen
+   directly from the phone's own storage, never uploaded anywhere)
+   and recreates every snag, its pins, and its photos. Existing
+   snags in the app are left alone — this only adds, never
+   overwrites or clears anything first, so it's safe to run even
+   if the app already has some data in it.
+   ============================================================ */
+async function importBackupFiles(fileList){
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  const statusEl = document.getElementById('importStatus');
+  const progWrap = document.getElementById('importProgressWrap');
+  const progFill = document.getElementById('importProgressFill');
+  progWrap.style.display = 'block';
+  progFill.style.width = '0%';
+
+  let totalImported = 0;
+  let totalFailed = 0;
+
+  for (const file of files){
+    statusEl.textContent = `Reading ${file.name}...`;
+    let zip;
+    try {
+      const buf = await file.arrayBuffer();
+      zip = await readZipFile(buf);
+    } catch (e){
+      await showAlert(`Could not read ${file.name}: ${e.message}`);
+      continue;
+    }
+
+    const jsonEntry = zip.entries.find(e => e.name === 'data.json');
+    if (!jsonEntry){
+      await showAlert(`${file.name} doesn't contain a data.json file — is this one of the app's own backup exports?`);
+      continue;
+    }
+    let records;
+    try {
+      const jsonBytes = await extractZipEntry(zip, jsonEntry);
+      records = JSON.parse(new TextDecoder().decode(jsonBytes));
+    } catch (e){
+      await showAlert(`${file.name}'s data file looks corrupted: ${e.message}`);
+      continue;
+    }
+
+    for (let i = 0; i < records.length; i++){
+      const rec = records[i];
+      statusEl.textContent = `Restoring ${rec.tag || 'snag ' + (i + 1)} from ${file.name} (${i + 1}/${records.length})...`;
+      progFill.style.width = Math.round(((i + 1) / records.length) * 100) + '%';
+      try {
+        // A fresh id is assigned (not the backup's original id) so this can
+        // never collide with anything already in the app — tag, room, pins,
+        // and photos are all preserved exactly as they were, just not the
+        // internal row number, which was never shown to you anyway.
+        const snagId = await idbPut('snags', {
+          tag: rec.tag, floorCode: rec.floorCode, roomCode: rec.roomCode, trade: rec.trade,
+          severity: rec.severity, status: rec.status, location: rec.location || '',
+          description: rec.description || '', comments: rec.comments || '',
+          pins: rec.pins || [],
+          createdAt: rec.createdAt || new Date().toISOString(),
+          updatedAt: rec.updatedAt || new Date().toISOString()
+        });
+
+        const thumbFiles = rec.thumbFiles || [];
+        const photoFiles = rec.photoFiles || [];
+        const photoCount = Math.max(thumbFiles.length, photoFiles.length);
+        for (let n = 0; n < photoCount; n++){
+          let thumbUrl = null, fullUrl = null;
+          if (thumbFiles[n]){
+            const e = zip.entries.find(x => x.name === thumbFiles[n]);
+            if (e) thumbUrl = uint8ArrayToDataUrl(await extractZipEntry(zip, e));
+          }
+          if (photoFiles[n]){
+            const e = zip.entries.find(x => x.name === photoFiles[n]);
+            if (e) fullUrl = uint8ArrayToDataUrl(await extractZipEntry(zip, e));
+          }
+          if (thumbUrl || fullUrl){
+            await addPhoto({ snagId, thumb: thumbUrl, full: fullUrl, order: n, createdAt: rec.createdAt || new Date().toISOString() });
+          }
+        }
+        totalImported++;
+      } catch (e){
+        totalFailed++;
+        console.error('Failed to restore', rec.tag, e);
+      }
+    }
+  }
+
+  progFill.style.width = '100%';
+  statusEl.textContent = `Restore complete — ${totalImported} snag(s) recovered${totalFailed ? `, ${totalFailed} failed (see browser console for details)` : ''}.`;
+  document.getElementById('importInput').value = '';
+  await renderAll();
+}
+
+/* ============================================================
    FULL ZIP EXPORT — data (JSON+CSV) + thumbnails + full-res
    photos, organised by tag, auto-split by size, optional
    compression.
@@ -1200,12 +1375,30 @@ async function runExport(){
     await new Promise(r => setTimeout(r, 400));
   }
 
-  statusEl.textContent = `Exported ${items.length} snag(s) across ${partBlobs.length} ZIP part(s). Upload the file(s) to Claude when ready for the final report.`;
+  await setMeta('lastExportAt', new Date().toISOString());
+  await checkBackupReminder();
+  statusEl.textContent = `Exported ${items.length} snag(s) across ${partBlobs.length} ZIP part(s). Upload the file(s) to Claude when ready for the final report, or keep them as a safe backup.`;
 }
 
 /* ============================================================
    INIT
    ============================================================ */
+async function checkBackupReminder(){
+  const banner = document.getElementById('backupReminder');
+  const text = document.getElementById('backupReminderText');
+  const items = await idbGetAll('snags');
+  if (items.length === 0){ banner.style.display = 'none'; return; }
+  const lastExport = await getMeta('lastExportAt', null);
+  const daysSince = lastExport ? (Date.now() - new Date(lastExport).getTime()) / 86400000 : Infinity;
+  if (daysSince > 3){
+    text.textContent = lastExport
+      ? `⚠️ It's been ${Math.floor(daysSince)} day(s) since your last backup export. This data only lives on this device — export regularly.`
+      : `⚠️ You haven't exported a backup yet. This data only lives on this device until you do — export now.`;
+    banner.style.display = 'flex';
+  } else {
+    banner.style.display = 'none';
+  }
+}
 async function renderAll(){
   // Only the stats bar always refreshes (cheap — just counts). The heavy
   // per-tab renders (especially the Snag List, which loads photos) only
@@ -1214,12 +1407,23 @@ async function renderAll(){
   // which one you were looking at, which is why things got sluggish as
   // the photo count grew.
   await renderStats();
+  await checkBackupReminder();
   await renderActiveTab();
 }
 (async function init(){
   document.getElementById('buildLabel').textContent = APP_BUILD;
   populateFloorSelects();
   renderChecklistHint();
+  // Ask the browser not to silently evict this site's storage under
+  // storage pressure or after a period of inactivity — this is the
+  // specific protection that was missing before, and the most likely
+  // reason a full week's worth of logged snags disappeared on their own.
+  if (navigator.storage && navigator.storage.persist){
+    try {
+      const granted = await navigator.storage.persist();
+      console.log('Persistent storage:', granted ? 'granted' : 'not granted (still best-effort — export regularly)');
+    } catch (e) { /* not supported in this browser — export reminder is the real backstop */ }
+  }
   await renderAll();
   if ('serviceWorker' in navigator){
     navigator.serviceWorker.register('sw.js').then((reg) => {
