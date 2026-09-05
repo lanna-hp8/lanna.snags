@@ -2,7 +2,7 @@
 // whether your phone is actually running the latest code, since the old
 // "Rev" line was showing the last-edited-snag time (which is per-device
 // data, not a code version) and was misleading for that purpose.
-const APP_BUILD = 'Build #15';
+const APP_BUILD = 'Build #16';
 
 /* ============================================================
    STORAGE LAYER — IndexedDB.
@@ -1027,7 +1027,8 @@ async function filteredItems(){
   const fs = document.getElementById('fSeverity').value;
   const fst = document.getElementById('fStatus').value;
   const qWords = document.getElementById('fSearch').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  return items.filter(i => {
+
+  function matches(i){
     if (ff && i.floorCode !== ff) return false;
     if (fr && i.roomCode !== fr) return false;
     if (ft && i.trade !== ft) return false;
@@ -1047,7 +1048,24 @@ async function filteredItems(){
       if (!qWords.every(w => hay.includes(w))) return false;
     }
     return true;
-  }).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  }
+
+  // Scanned in small batches with a yield between each, rather than one
+  // unbroken pass over the whole list — a long synchronous scan like that
+  // (200+ items, every field checked) can run as one uninterrupted block
+  // long enough to cause Bluetooth audio dropouts on a phone, which is
+  // exactly what searching was doing regardless of how many results it
+  // actually returned.
+  const BATCH_SIZE = 25;
+  const results = [];
+  for (let i = 0; i < items.length; i += BATCH_SIZE){
+    const batch = items.slice(i, i + BATCH_SIZE);
+    for (const item of batch){ if (matches(item)) results.push(item); }
+    if (i + BATCH_SIZE < items.length){
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+  }
+  return results.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 }
 function hasActiveFilter(){
   return !!(document.getElementById('fFloor').value || document.getElementById('fRoom').value ||
@@ -1093,6 +1111,10 @@ async function renderList(){
     const photos = await getPhotosForSnag(items[i].id);
     withPhotos.push({ item: items[i], photos });
     progFill.style.width = Math.round(((i + 1) / items.length) * 100) + '%';
+    // Extra safety margin, same idea as the search scan above — each
+    // IndexedDB read already yields naturally, but an explicit pause every
+    // few items costs nothing and rules this loop out too.
+    if (i % 10 === 9) await new Promise(resolve => setTimeout(resolve, 0));
   }
   progWrap.style.display = 'none';
   container.innerHTML = withPhotos.map(({ item: i, photos }) => `
