@@ -2,7 +2,7 @@
 // whether your phone is actually running the latest code, since the old
 // "Rev" line was showing the last-edited-snag time (which is per-device
 // data, not a code version) and was misleading for that purpose.
-const APP_BUILD = 'Build #19';
+const APP_BUILD = 'Build #20';
 
 /* ============================================================
    STORAGE LAYER — IndexedDB.
@@ -1547,17 +1547,34 @@ async function renderAll(){
   document.getElementById('buildLabel').textContent = APP_BUILD;
   populateFloorSelects();
   renderChecklistHint();
+  await renderAll();
   // Ask the browser not to silently evict this site's storage under
   // storage pressure or after a period of inactivity — this is the
   // specific protection that was missing before, and the most likely
   // reason a full week's worth of logged snags disappeared on their own.
+  //
+  // Previously this called persist() unconditionally on every single
+  // launch, even long after it had already been granted — repeating what
+  // is effectively a system-level storage request at the exact moment the
+  // app first comes to the foreground, every time. Now it checks first
+  // (persisted() is a quiet status read, not a request) and only actually
+  // asks if it isn't already granted — so in practice this fires once,
+  // ever, not on every launch — and it's deferred slightly, and moved
+  // after the app has already rendered, so it's not competing with
+  // whatever's happening in the first instant the app opens.
   if (navigator.storage && navigator.storage.persist){
-    try {
-      const granted = await navigator.storage.persist();
-      console.log('Persistent storage:', granted ? 'granted' : 'not granted (still best-effort — export regularly)');
-    } catch (e) { /* not supported in this browser — export reminder is the real backstop */ }
+    setTimeout(async () => {
+      try {
+        const already = navigator.storage.persisted ? await navigator.storage.persisted() : false;
+        if (already){
+          console.log('Persistent storage: already granted from a previous session — not asking again.');
+        } else {
+          const granted = await navigator.storage.persist();
+          console.log('Persistent storage:', granted ? 'granted' : 'not granted (still best-effort — export regularly)');
+        }
+      } catch (e) { /* not supported in this browser — export reminder is the real backstop */ }
+    }, 2000);
   }
-  await renderAll();
   if ('serviceWorker' in navigator){
     navigator.serviceWorker.register('sw.js').then((reg) => {
       reg.update(); // explicitly check for a newer sw.js on every app launch
