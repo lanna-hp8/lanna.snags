@@ -2,7 +2,7 @@
 // whether your phone is actually running the latest code, since the old
 // "Rev" line was showing the last-edited-snag time (which is per-device
 // data, not a code version) and was misleading for that purpose.
-const APP_BUILD = 'Build #18';
+const APP_BUILD = 'Build #19';
 
 /* ============================================================
    STORAGE LAYER — IndexedDB.
@@ -947,12 +947,30 @@ function onPinLightboxZoomChange(){
    FLOOR PLAN TAB
    ============================================================ */
 let activePlanFloor = 'GF';
-async function roomStatusClass(floorCode, roomCode, items){
-  const filtered = items.filter(i => i.floorCode === floorCode && i.roomCode === roomCode);
-  const openCount = filtered.filter(i => i.status !== 'Verified/Closed').length;
-  if (filtered.length > 0 && openCount > 0) return 'some';
-  if (filtered.length > 0 && openCount === 0) return 'clear';
-  return '';
+/* Builds the open/clear status for every room in ONE pass through the
+   snag list, instead of the old approach of filtering the entire list
+   again for every single pin/room (roughly 40+ separate full-list scans
+   on the Floor Plan tab alone, ~145 across Floor Plan + Coverage + Whole
+   House combined, all packed together with no yields — that's the real
+   reason this tab could cause an audio dropout just from loading: it's
+   the same blocking-work problem as the search fix, just triggered by
+   page load and tab switches rather than searching). Now it's a single
+   O(items) pass regardless of how many rooms/pins exist, with lookups
+   afterwards being instant. */
+function buildRoomStatusMap(items){
+  const map = {};
+  for (const i of items){
+    const key = i.floorCode + '|' + i.roomCode;
+    if (!map[key]) map[key] = { total: 0, open: 0 };
+    map[key].total++;
+    if (i.status !== 'Verified/Closed') map[key].open++;
+  }
+  return map;
+}
+function statusClassFromMap(map, floorCode, roomCode){
+  const entry = map[floorCode + '|' + roomCode];
+  if (!entry || entry.total === 0) return '';
+  return entry.open > 0 ? 'some' : 'clear';
 }
 function renderPlanSubtabs(){
   const el = document.getElementById('planSubtabs');
@@ -966,26 +984,27 @@ async function renderPlanImage(){
   const pins = PIN_COORDS[activePlanFloor] || [];
   const floor = FLOORS.find(f => f.code === activePlanFloor);
   const items = await idbGetAll('snags');
+  const statusMap = buildRoomStatusMap(items);
   const imgFile = activePlanFloor === '1F' ? 'ff' : activePlanFloor === '2F' ? 'sf' : 'gf';
-  const pinHtml = await Promise.all(pins.map(async ([code, x, y]) => {
+  const pinHtml = pins.map(([code, x, y]) => {
     const name = (floor.rooms.find(r => r[0] === code) || [code, code])[1];
-    const cls = await roomStatusClass(activePlanFloor, code, items);
+    const cls = statusClassFromMap(statusMap, activePlanFloor, code);
     return `<div class="pin-holder" style="left:${x}%; top:${y}%;">
       <div class="pin ${cls}" onclick="openAddModal('${activePlanFloor}','${code}')">${code}</div>
       <div class="pin-label">${name}</div>
     </div>`;
-  }));
+  });
   wrap.innerHTML = `<img src="plans/${imgFile}.jpg" alt="${floor.name} plan">` + pinHtml.join('');
 }
 async function renderWhButtons(){
   const floor = FLOORS.find(f => f.code === 'WH');
   const el = document.getElementById('whButtons');
   const items = await idbGetAll('snags');
-  const html = await Promise.all(floor.rooms.map(async ([code, name]) => {
-    const cls = await roomStatusClass('WH', code, items);
+  const statusMap = buildRoomStatusMap(items);
+  el.innerHTML = floor.rooms.map(([code, name]) => {
+    const cls = statusClassFromMap(statusMap, 'WH', code);
     return `<button class="wh-btn" onclick="openAddModal('WH','${code}')"><span class="dot ${cls}"></span>${name}</button>`;
-  }));
-  el.innerHTML = html.join('');
+  }).join('');
 }
 async function renderPlanTab(){ renderPlanSubtabs(); await renderPlanImage(); await renderWhButtons(); }
 
@@ -995,13 +1014,13 @@ async function renderPlanTab(){ renderPlanSubtabs(); await renderPlanImage(); aw
 async function renderCoverage(){
   const container = document.getElementById('coverageContainer');
   const items = await idbGetAll('snags');
+  const statusMap = buildRoomStatusMap(items); // one pass, not a filter per room card
   container.innerHTML = FLOORS.map(floor => {
     const cards = floor.rooms.map(([code, name]) => {
-      const filtered = items.filter(i => i.floorCode === floor.code && i.roomCode === code);
-      const openCount = filtered.filter(i => i.status !== 'Verified/Closed').length;
+      const entry = statusMap[floor.code + '|' + code];
       let pillClass = 'zero', pillText = '0 logged';
-      if (filtered.length > 0 && openCount > 0){ pillClass = 'some'; pillText = openCount + ' open'; }
-      else if (filtered.length > 0 && openCount === 0){ pillClass = 'clear'; pillText = 'all clear'; }
+      if (entry && entry.total > 0 && entry.open > 0){ pillClass = 'some'; pillText = entry.open + ' open'; }
+      else if (entry && entry.total > 0 && entry.open === 0){ pillClass = 'clear'; pillText = 'all clear'; }
       return `
         <div class="room-card" onclick="openAddModal('${floor.code}','${code}')">
           <div class="code">${floor.code}-${code}</div>
