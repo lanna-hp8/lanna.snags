@@ -2,7 +2,7 @@
 // whether your phone is actually running the latest code, since the old
 // "Rev" line was showing the last-edited-snag time (which is per-device
 // data, not a code version) and was misleading for that purpose.
-const APP_BUILD = 'Build #20';
+const APP_BUILD = 'Build #21';
 
 /* ============================================================
    STORAGE LAYER — IndexedDB.
@@ -138,9 +138,55 @@ async function getPhotosForSnag(snagId){
     req.onerror = () => reject(req.error);
   });
 }
+async function getPhotoRecord(id){
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('photos', 'readonly');
+    const req = tx.objectStore('photos').get(id);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
 async function getAllPhotos(){ return idbGetAll('photos'); }
-async function addPhoto(record){ return idbPut('photos', record); }
-async function deletePhoto(id){ return idbDelete('photos', id); }
+
+/* Running total of photo storage used (bytes), maintained incrementally
+   instead of recomputed by scanning every photo. This used to be the
+   single biggest memory cost in the whole app: renderStats() ran on
+   nearly every interaction and, every time, pulled EVERY full-resolution
+   photo's entire base64 payload into one in-memory array just to add up
+   string lengths — with 200+ multi-megabyte photos, that's plausibly
+   hundreds of MB to over a gigabyte momentarily materialized on almost
+   every tap. That's very likely what was making Chrome discard the tab
+   under memory pressure whenever it was backgrounded, which in turn
+   meant a full reload (and the audio interruption) every time you
+   switched back. Now it's a single small number read from storage.
+*/
+async function getPhotoBytesTotal(){
+  let total = await getMeta('photoBytesTotal', null);
+  if (total === null){
+    // One-time migration for anyone upgrading from before this fix — a
+    // single full scan, done once, never again after this.
+    total = 0;
+    const allPhotos = await getAllPhotos();
+    for (const p of allPhotos){ if (p.full) total += Math.round(p.full.length * 0.75); }
+    await setMeta('photoBytesTotal', total);
+  }
+  return total;
+}
+async function adjustPhotoBytesTotal(deltaBytes){
+  const current = await getPhotoBytesTotal();
+  await setMeta('photoBytesTotal', Math.max(0, current + deltaBytes));
+}
+async function addPhoto(record){
+  const id = await idbPut('photos', record);
+  if (record.full) await adjustPhotoBytesTotal(Math.round(record.full.length * 0.75));
+  return id;
+}
+async function deletePhoto(id){
+  const rec = await getPhotoRecord(id);
+  await idbDelete('photos', id);
+  if (rec && rec.full) await adjustPhotoBytesTotal(-Math.round(rec.full.length * 0.75));
+}
 async function deletePhotosForSnag(snagId){
   const photos = await getPhotosForSnag(snagId);
   for (const p of photos) await deletePhoto(p.id);
@@ -464,7 +510,9 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     // Entering the List tab is a deliberate action, so it's fine (and
     // expected) to show it fresh here — the thing we're avoiding is it
     // silently re-rendering while you're just sitting on it.
-    if (activeTab === 'list') renderList(); else renderActiveTab();
+    if (activeTab === 'list') renderList();
+    else if (activeTab === 'export') updateExportScopeLabel();
+    else renderActiveTab();
   });
 });
 function renderActiveTab(){
@@ -642,8 +690,13 @@ function handlePhotoInput(evt){
     reader.onload = function(e){
       const img = new Image();
       img.onload = function(){
-        // Thumbnail (small, for quick reference in lists)
-        const maxW = 700;
+        // Thumbnail (small, for quick reference in lists) — these only ever
+        // display at 64-90px on screen (ticket previews, pin-mini boxes),
+        // so 700px was drastically oversized for the job: more storage AND
+        // roughly 5x more decode memory every time one rendered, for zero
+        // visible benefit. 320px is still sharp even on a high-DPI screen
+        // at the sizes these actually appear.
+        const maxW = 320;
         const scale = Math.min(1, maxW / img.width);
         const thumbCanvas = document.createElement('canvas');
         thumbCanvas.width = img.width * scale;
@@ -1218,6 +1271,59 @@ function goToPage(n){
   currentPage = n;
   return renderCurrentPage();
 }
+
+/* Bulk delete — scoped to exactly whatever the current Snag List search
+   matched (currentSearchResults), the same snapshot used for pagination
+   and for the "export just this search" scope, so what you delete always
+   matches what you can export first. A strong, type-to-confirm gate since
+   this is genuinely irreversible at scale. */
+function openBulkDeleteModal(){
+  const total = currentSearchResults.length;
+  if (total === 0){
+    showAlert('No snags currently match your filters to delete. Run a search first (or "Show every snag anyway" if you really mean everything).');
+    return;
+  }
+  document.getElementById('bulkDeleteMessage').textContent =
+    `You're about to permanently delete ${total} snag(s) matching your current search, including all their photos. This cannot be undone. Make sure you've exported a backup of these first — the Export tab has an option to export just this same search. Type DELETE below to confirm.`;
+  document.getElementById('bulkDeleteConfirmInput').value = '';
+  document.getElementById('bulkDeleteProgressWrap').style.display = 'none';
+  onBulkDeleteInputChange();
+  document.getElementById('bulkDeleteOverlay').classList.add('show');
+}
+function closeBulkDeleteModal(){
+  document.getElementById('bulkDeleteOverlay').classList.remove('show');
+}
+function onBulkDeleteInputChange(){
+  const val = document.getElementById('bulkDeleteConfirmInput').value;
+  const btn = document.getElementById('bulkDeleteConfirmBtn');
+  const ready = val === 'DELETE';
+  btn.style.opacity = ready ? '1' : '0.5';
+  btn.style.pointerEvents = ready ? 'auto' : 'none';
+}
+async function confirmBulkDelete(){
+  if (document.getElementById('bulkDeleteConfirmInput').value !== 'DELETE') return;
+  const toDelete = currentSearchResults.slice(); // snapshot — unaffected by anything changing mid-loop
+  const progWrap = document.getElementById('bulkDeleteProgressWrap');
+  const progFill = document.getElementById('bulkDeleteProgressFill');
+  progWrap.style.display = 'block';
+  progFill.style.width = '0%';
+  document.getElementById('bulkDeleteConfirmBtn').style.pointerEvents = 'none';
+  for (let i = 0; i < toDelete.length; i++){
+    await deletePhotosForSnag(toDelete[i].id);
+    await idbDelete('snags', toDelete[i].id);
+    progFill.style.width = Math.round(((i + 1) / toDelete.length) * 100) + '%';
+    if (i % 10 === 9) await new Promise(r => setTimeout(r, 0));
+  }
+  closeBulkDeleteModal();
+  const deletedCount = toDelete.length;
+  currentSearchResults = [];
+  currentPage = 0;
+  showAllRequested = false;
+  document.getElementById('clearAfterExportBox').style.display = 'none';
+  await renderAll();
+  await showAlert(`Deleted ${deletedCount} snag(s) and their photos.`);
+}
+
 async function quickStatus(id, value){
   const items = await idbGetAll('snags');
   const item = items.find(i => i.id === id);
@@ -1247,10 +1353,9 @@ async function renderStats(){
   const last = items.slice().sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))[0];
   document.getElementById('lastUpdated').textContent = last ? new Date(last.updatedAt).toLocaleString('en-GB') : 'no entries yet';
 
-  // Approximate photo storage used (sum of full-res photo string sizes, from the separate photos store)
-  const allPhotos = await getAllPhotos();
-  let totalBytes = 0;
-  allPhotos.forEach(p => { if (p.full) totalBytes += Math.round(p.full.length * 0.75); });
+  // Approximate photo storage used — a maintained running total, not a
+  // full-table scan (see getPhotoBytesTotal above for why that mattered).
+  const totalBytes = await getPhotoBytesTotal();
   const mb = totalBytes / (1024 * 1024);
   let label = mb < 1 ? Math.round(totalBytes / 1024) + ' KB' : mb.toFixed(mb < 10 ? 2 : 0) + ' MB';
   if (navigator.storage && navigator.storage.estimate){
@@ -1394,15 +1499,37 @@ async function importBackupFiles(fileList){
    photos, organised by tag, auto-split by size, optional
    compression.
    ============================================================ */
+function updateExportScopeLabel(){
+  const scope = document.getElementById('exportScope').value;
+  const note = document.getElementById('exportScopeNote');
+  if (scope === 'filtered'){
+    const n = currentSearchResults.length;
+    note.textContent = n > 0
+      ? `${n} snag(s) currently match your last Snag List search and will be exported.`
+      : `No active Snag List search right now — go run one first, or this will show an error when you export.`;
+  } else {
+    note.textContent = '';
+  }
+}
 async function runExport(){
   const maxSizeMB = parseInt(document.getElementById('exportMaxSize').value, 10);
   const maxSizeBytes = maxSizeMB * 1024 * 1024;
   const compress = document.getElementById('exportCompress').checked;
+  const scope = document.getElementById('exportScope').value;
   const statusEl = document.getElementById('exportStatus');
   const progWrap = document.getElementById('exportProgressWrap');
   const progFill = document.getElementById('exportProgressFill');
 
-  const items = await idbGetAll('snags');
+  let items;
+  if (scope === 'filtered'){
+    if (currentSearchResults.length === 0){
+      await showAlert('No current Snag List search to export — go run a search on the Snag List tab first, or choose "Everything" instead.');
+      return;
+    }
+    items = currentSearchResults.slice();
+  } else {
+    items = await idbGetAll('snags');
+  }
   if (items.length === 0){ await showAlert('No snags to export yet.'); return; }
 
   progWrap.style.display = 'block';
@@ -1511,6 +1638,19 @@ async function runExport(){
   await setMeta('lastExportAt', new Date().toISOString());
   await checkBackupReminder();
   statusEl.textContent = `Exported ${items.length} snag(s) across ${partBlobs.length} ZIP part(s). Upload the file(s) to Claude when ready for the final report, or keep them as a safe backup.`;
+
+  // Surface the "clear it now" option only after a confirmed successful
+  // export, scoped to exactly what was just backed up — never shown
+  // pre-emptively, so there's no route to clearing something that wasn't
+  // actually exported first.
+  const clearBox = document.getElementById('clearAfterExportBox');
+  const clearText = document.getElementById('clearAfterExportText');
+  if (scope === 'filtered'){
+    clearText.textContent = `These ${items.length} snag(s) matching your last Snag List search are now backed up. If you're done with them here, you can delete exactly this set from the Snag List tab — the same search is still active there, so "Delete all shown" will match what you just exported.`;
+  } else {
+    clearText.textContent = `All ${items.length} snag(s) are now backed up. To clear everything, go to the Snag List tab, tap "Show every snag anyway", then "Delete all shown".`;
+  }
+  clearBox.style.display = 'block';
 }
 
 /* ============================================================
