@@ -2,7 +2,7 @@
 // whether your phone is actually running the latest code, since the old
 // "Rev" line was showing the last-edited-snag time (which is per-device
 // data, not a code version) and was misleading for that purpose.
-const APP_BUILD = 'Build #16';
+const APP_BUILD = 'Build #18';
 
 /* ============================================================
    STORAGE LAYER — IndexedDB.
@@ -1086,34 +1086,79 @@ function performSearch(){
   showAllRequested = false;
   return renderList();
 }
+function resetFilters(){
+  document.getElementById('fFloor').value = '';
+  populateRoomFilterSelect(); // floor reset to "all" — repopulate rooms back to every floor's list
+  document.getElementById('fRoom').value = ''; // explicitly cleared — populateRoomFilterSelect otherwise
+                                                // preserves whatever room was picked (by design, for normal
+                                                // floor-switching), which fights a full reset
+  document.getElementById('fTrade').value = '';
+  document.getElementById('fSeverity').value = '';
+  document.getElementById('fStatus').value = '';
+  document.getElementById('fSearch').value = '';
+  showAllRequested = false;
+  return renderList(); // no criteria left, so this just returns to the "pick a filter" prompt
+}
+
+/* Pagination state — the full matched set is cached in memory once per
+   search (a snapshot, consistent with the rest of the list's behaviour),
+   but only ONE PAGE's worth of photos is ever loaded and rendered at a
+   time. This is the actual fix for both the audio dropouts and the crash:
+   a broad filter used to try to decode and hold every matching snag's
+   full-res photos in memory simultaneously — now it never holds more than
+   PAGE_SIZE snags' worth regardless of how many total matches there are. */
+let currentSearchResults = [];
+let currentPage = 0;
+const PAGE_SIZE = 50;
 
 async function renderList(){
   const container = document.getElementById('listContainer');
   const progWrap = document.getElementById('listProgressWrap');
-  const progFill = document.getElementById('listProgressFill');
+  const pagWrap = document.getElementById('listPagination');
   progWrap.style.display = 'none';
   if (!hasActiveFilter() && !showAllRequested){
+    currentSearchResults = [];
+    currentPage = 0;
+    pagWrap.innerHTML = '';
     container.innerHTML = `<div class="empty-state">Pick a filter above (floor, trade, severity, status) and/or type a search, then tap Search — keeps things fast with a large list.<br><br><button class="btn" onclick="showAllSnags()">Show every snag anyway</button></div>`;
     return;
   }
-  const items = await filteredItems();
-  if (items.length === 0){
+  currentSearchResults = await filteredItems();
+  currentPage = 0;
+  await renderCurrentPage();
+}
+
+async function renderCurrentPage(){
+  const container = document.getElementById('listContainer');
+  const progWrap = document.getElementById('listProgressWrap');
+  const progFill = document.getElementById('listProgressFill');
+  const pagWrap = document.getElementById('listPagination');
+
+  const total = currentSearchResults.length;
+  if (total === 0){
+    progWrap.style.display = 'none';
+    pagWrap.innerHTML = '';
     container.innerHTML = `<div class="empty-state">No snags match these filters yet.</div>`;
     return;
   }
+
+  const totalPages = Math.ceil(total / PAGE_SIZE);
+  if (currentPage >= totalPages) currentPage = totalPages - 1;
+  if (currentPage < 0) currentPage = 0;
+  const start = currentPage * PAGE_SIZE;
+  const pageItems = currentSearchResults.slice(start, start + PAGE_SIZE);
+
   // Loaded sequentially (not Promise.all) specifically so the progress bar
   // reflects real work completing, not a fake animation — each tick is an
-  // actual result's photos having just finished loading.
+  // actual result's photos having just finished loading. Only ever this
+  // one page's worth (≤50), never the full matched set.
   progWrap.style.display = 'block';
   progFill.style.width = '0%';
   const withPhotos = [];
-  for (let i = 0; i < items.length; i++){
-    const photos = await getPhotosForSnag(items[i].id);
-    withPhotos.push({ item: items[i], photos });
-    progFill.style.width = Math.round(((i + 1) / items.length) * 100) + '%';
-    // Extra safety margin, same idea as the search scan above — each
-    // IndexedDB read already yields naturally, but an explicit pause every
-    // few items costs nothing and rules this loop out too.
+  for (let i = 0; i < pageItems.length; i++){
+    const photos = await getPhotosForSnag(pageItems[i].id);
+    withPhotos.push({ item: pageItems[i], photos });
+    progFill.style.width = Math.round(((i + 1) / pageItems.length) * 100) + '%';
     if (i % 10 === 9) await new Promise(resolve => setTimeout(resolve, 0));
   }
   progWrap.style.display = 'none';
@@ -1138,6 +1183,21 @@ async function renderList(){
       </div>
     </div>
   `).join('');
+
+  if (totalPages > 1){
+    pagWrap.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:14px;flex-wrap:wrap;">
+        <button class="btn small" ${currentPage === 0 ? 'disabled' : ''} onclick="goToPage(${currentPage - 1})">← Previous</button>
+        <span style="font-size:12.5px;color:var(--text-soft);text-align:center;">Showing ${start + 1}–${Math.min(start + PAGE_SIZE, total)} of ${total} matches — page ${currentPage + 1} of ${totalPages}. Narrow your search for more exact results.</span>
+        <button class="btn small" ${currentPage >= totalPages - 1 ? 'disabled' : ''} onclick="goToPage(${currentPage + 1})">Next →</button>
+      </div>`;
+  } else {
+    pagWrap.innerHTML = `<div style="font-size:12px;color:var(--text-soft);margin-top:10px;">${total} match${total === 1 ? '' : 'es'}.</div>`;
+  }
+}
+function goToPage(n){
+  currentPage = n;
+  return renderCurrentPage();
 }
 async function quickStatus(id, value){
   const items = await idbGetAll('snags');
@@ -1145,13 +1205,15 @@ async function quickStatus(id, value){
   item.status = value;
   item.updatedAt = new Date().toISOString();
   await idbPut('snags', item);
-  // Refreshed directly (not via renderAll/renderActiveTab) — this is a
-  // deliberate edit on a row already visible, so instant feedback is right
-  // here, without reintroducing a general "list silently updates" behavior
-  // for changes made elsewhere in the app.
+  // Keep the cached page of results in sync with this one direct edit,
+  // then re-render just the current page — not a fresh query (that would
+  // be a silent re-search) and not the full result set (that's the memory
+  // problem this whole change exists to avoid).
+  const cached = currentSearchResults.find(i => i.id === id);
+  if (cached){ cached.status = value; cached.updatedAt = item.updatedAt; }
   await renderStats();
   await checkBackupReminder();
-  await renderList();
+  await renderCurrentPage();
 }
 
 /* ============================================================

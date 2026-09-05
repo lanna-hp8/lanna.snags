@@ -216,9 +216,11 @@
       </div>
       <div class="search-box"><input type="search" id="fSearch" placeholder="Search..." onkeydown="if(event.key==='Enter'){performSearch();}"></div>
       <button class="btn primary" onclick="performSearch()">🔍 Search</button>
+      <button class="btn ghost" onclick="resetFilters()">Reset filters</button>
     </div>
     <div class="progress-bar" id="listProgressWrap" style="display:none;margin-bottom:10px;"><div class="fill" id="listProgressFill"></div></div>
     <div id="listContainer"></div>
+    <div id="listPagination"></div>
   </div>
 
   <div class="tab-panel" id="tab-export">
