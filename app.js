@@ -2,7 +2,7 @@
 // whether your phone is actually running the latest code, since the old
 // "Rev" line was showing the last-edited-snag time (which is per-device
 // data, not a code version) and was misleading for that purpose.
-const APP_BUILD = 'Build #14';
+const APP_BUILD = 'Build #15';
 
 /* ============================================================
    STORAGE LAYER — IndexedDB.
@@ -461,11 +461,21 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     btn.classList.add('active');
     document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
     activeTab = btn.dataset.tab;
-    renderActiveTab();
+    // Entering the List tab is a deliberate action, so it's fine (and
+    // expected) to show it fresh here — the thing we're avoiding is it
+    // silently re-rendering while you're just sitting on it.
+    if (activeTab === 'list') renderList(); else renderActiveTab();
   });
 });
 function renderActiveTab(){
-  if (activeTab === 'list') renderList();
+  // 'list' is intentionally NOT included here — search results are a
+  // deliberate snapshot, not a live view. Every save/delete/status-change
+  // anywhere in the app used to silently re-run whatever search was showing
+  // (via this function), which both made new entries appear without asking
+  // and was a real contributor to sluggishness — reloading every matched
+  // result's photos on every unrelated change. Now the list only refreshes
+  // on Search/Enter, on entering the tab, or a status change made directly
+  // on a row already showing (see quickStatus).
   if (activeTab === 'coverage') renderCoverage();
   if (activeTab === 'plan') renderPlanTab();
   // 'export' tab has no data render — it only acts when you tap the export buttons
@@ -1050,17 +1060,20 @@ function statusClass(s){ return STATUS_CLASS_MAP[s] || 'st-open'; }
 function escapeHtml(s){ return (s || '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 
 let showAllRequested = false;
-function showAllSnags(){ showAllRequested = true; renderList(); }
+function showAllSnags(){ showAllRequested = true; return renderList(); }
 function performSearch(){
   // Explicit action: filters/search no longer trigger on every keystroke or
   // dropdown change — pressing Search (or Enter in the search box) is what
   // actually clears whatever was showing and runs the query fresh.
   showAllRequested = false;
-  renderList();
+  return renderList();
 }
 
 async function renderList(){
   const container = document.getElementById('listContainer');
+  const progWrap = document.getElementById('listProgressWrap');
+  const progFill = document.getElementById('listProgressFill');
+  progWrap.style.display = 'none';
   if (!hasActiveFilter() && !showAllRequested){
     container.innerHTML = `<div class="empty-state">Pick a filter above (floor, trade, severity, status) and/or type a search, then tap Search — keeps things fast with a large list.<br><br><button class="btn" onclick="showAllSnags()">Show every snag anyway</button></div>`;
     return;
@@ -1070,7 +1083,18 @@ async function renderList(){
     container.innerHTML = `<div class="empty-state">No snags match these filters yet.</div>`;
     return;
   }
-  const withPhotos = await Promise.all(items.map(async i => ({ item: i, photos: await getPhotosForSnag(i.id) })));
+  // Loaded sequentially (not Promise.all) specifically so the progress bar
+  // reflects real work completing, not a fake animation — each tick is an
+  // actual result's photos having just finished loading.
+  progWrap.style.display = 'block';
+  progFill.style.width = '0%';
+  const withPhotos = [];
+  for (let i = 0; i < items.length; i++){
+    const photos = await getPhotosForSnag(items[i].id);
+    withPhotos.push({ item: items[i], photos });
+    progFill.style.width = Math.round(((i + 1) / items.length) * 100) + '%';
+  }
+  progWrap.style.display = 'none';
   container.innerHTML = withPhotos.map(({ item: i, photos }) => `
     <div class="snag-ticket sev-${i.severity}">
       <div class="ticket-top">
@@ -1099,7 +1123,13 @@ async function quickStatus(id, value){
   item.status = value;
   item.updatedAt = new Date().toISOString();
   await idbPut('snags', item);
-  await renderAll();
+  // Refreshed directly (not via renderAll/renderActiveTab) — this is a
+  // deliberate edit on a row already visible, so instant feedback is right
+  // here, without reintroducing a general "list silently updates" behavior
+  // for changes made elsewhere in the app.
+  await renderStats();
+  await checkBackupReminder();
+  await renderList();
 }
 
 /* ============================================================
@@ -1429,14 +1459,15 @@ async function renderAll(){
     navigator.serviceWorker.register('sw.js').then((reg) => {
       reg.update(); // explicitly check for a newer sw.js on every app launch
     }).catch(() => {});
-    // If a new service worker takes over mid-session, reload once so the
-    // page actually reflects it, rather than sitting on stale code until
-    // the next manual relaunch.
-    let reloaded = false;
+    // A new service worker taking over used to trigger an IMMEDIATE, silent
+    // page reload — which turned out to be the likely cause of music
+    // interrupting sporadically (a full reload is exactly the kind of event
+    // that can knock out background audio on a phone). Now it just shows a
+    // dismissible prompt and waits for an explicit tap — never forces a
+    // reload on you mid-task.
     navigator.serviceWorker.addEventListener('controllerchange', () => {
-      if (reloaded) return;
-      reloaded = true;
-      window.location.reload();
+      const banner = document.getElementById('updateReminder');
+      if (banner) banner.style.display = 'flex';
     });
   }
 })();
