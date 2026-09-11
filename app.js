@@ -2,7 +2,7 @@
 // whether your phone is actually running the latest code, since the old
 // "Rev" line was showing the last-edited-snag time (which is per-device
 // data, not a code version) and was misleading for that purpose.
-const APP_BUILD = 'Build #21';
+const APP_BUILD = 'Build #22';
 
 /* ============================================================
    STORAGE LAYER — IndexedDB.
@@ -1649,6 +1649,120 @@ async function runExport(){
     clearText.textContent = `These ${items.length} snag(s) matching your last Snag List search are now backed up. If you're done with them here, you can delete exactly this set from the Snag List tab — the same search is still active there, so "Delete all shown" will match what you just exported.`;
   } else {
     clearText.textContent = `All ${items.length} snag(s) are now backed up. To clear everything, go to the Snag List tab, tap "Show every snag anyway", then "Delete all shown".`;
+  }
+  clearBox.style.display = 'block';
+}
+
+/* Automatic batch export — the real fix for a dataset too large for one
+   continuous export to handle. Each batch is a completely separate,
+   self-contained operation: build a small ZIP, trigger its download, let
+   it fully finish, THEN move to the next batch. Because each batch
+   actually completes before the next begins, the browser gets a real
+   chance to release that batch's memory (decoded photos, the finished
+   Blob, everything) rather than everything accumulating across one long
+   unbroken run — which is what was crashing the single-ZIP export on a
+   1.4GB dataset. */
+async function runBatchExport(){
+  const batchSize = parseInt(document.getElementById('batchSize').value, 10);
+  const compress = document.getElementById('exportCompress').checked;
+  const scope = document.getElementById('exportScope').value;
+  const statusEl = document.getElementById('exportStatus');
+  const progWrap = document.getElementById('exportProgressWrap');
+  const progFill = document.getElementById('exportProgressFill');
+
+  let items;
+  if (scope === 'filtered'){
+    if (currentSearchResults.length === 0){
+      await showAlert('No current Snag List search to export — go run a search on the Snag List tab first, or choose "Everything" instead.');
+      return;
+    }
+    items = currentSearchResults.slice();
+  } else {
+    items = await idbGetAll('snags');
+  }
+  if (items.length === 0){ await showAlert('No snags to export yet.'); return; }
+
+  const totalBatches = Math.ceil(items.length / batchSize);
+  progWrap.style.display = 'block';
+  progFill.style.width = '0%';
+
+  for (let b = 0; b < totalBatches; b++){
+    const batchItems = items.slice(b * batchSize, (b + 1) * batchSize);
+    statusEl.textContent = `Building batch ${b + 1} of ${totalBatches} (${batchItems.length} snags)...`;
+
+    const zip = new ZipWriter();
+    const headers = ['Tag','Floor','Room','Trade','Severity','Status','Location detail','Description','Comments','Pins','ThumbFiles','PhotoFiles','Logged','Updated'];
+    const csvRows = [headers];
+    const jsonRecords = [];
+
+    for (const item of batchItems){
+      const photos = await getPhotosForSnag(item.id);
+      const thumbFiles = [];
+      const photoFiles = [];
+      for (let idx = 0; idx < photos.length; idx++){
+        if (photos[idx].thumb){
+          const fname = `photos/${item.tag}_thumb_${idx + 1}.jpg`;
+          await zip.addFile(fname, dataUrlToUint8Array(photos[idx].thumb), compress);
+          thumbFiles.push(fname);
+        }
+        if (photos[idx].full){
+          const fname = `photos/${item.tag}_full_${idx + 1}.jpg`;
+          await zip.addFile(fname, dataUrlToUint8Array(photos[idx].full), compress);
+          photoFiles.push(fname);
+        }
+      }
+      const pinsStr = (item.pins || []).map(p => `${p.x},${p.y}`).join('|');
+      csvRows.push([
+        item.tag, FLOORS.find(f => f.code === item.floorCode).name, roomName(item.floorCode, item.roomCode),
+        item.trade, item.severity, item.status, item.location || '', item.description || '', item.comments || '',
+        pinsStr, thumbFiles.join('|'), photoFiles.join('|'),
+        new Date(item.createdAt).toLocaleString('en-GB'), new Date(item.updatedAt).toLocaleString('en-GB')
+      ]);
+      jsonRecords.push({
+        tag: item.tag, floorCode: item.floorCode, floorName: FLOORS.find(f => f.code === item.floorCode).name,
+        roomCode: item.roomCode, roomName: roomName(item.floorCode, item.roomCode),
+        trade: item.trade, severity: item.severity, status: item.status,
+        location: item.location || '', description: item.description || '', comments: item.comments || '',
+        pins: item.pins || [], thumbFiles, photoFiles,
+        createdAt: item.createdAt, updatedAt: item.updatedAt
+      });
+    }
+
+    const csvText = csvRows.map(r => r.map(cell => {
+      const c = String(cell).replace(/"/g, '""');
+      return /[",\n]/.test(c) ? `"${c}"` : c;
+    }).join(',')).join('\n');
+    await zip.addFile('data.csv', strToBytes(csvText), compress);
+    await zip.addFile('data.json', strToBytes(JSON.stringify(jsonRecords, null, 2)), compress);
+
+    const blob = zip.finalize();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `snag_export_batch${b + 1}of${totalBatches}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+
+    progFill.style.width = Math.round(((b + 1) / totalBatches) * 100) + '%';
+
+    // This pause is the actual fix, not just pacing the downloads — it
+    // gives the browser a real chance to release this batch's memory
+    // (the finished Blob, every decoded photo, the ZipWriter's buffers)
+    // before the next batch starts building from a clean slate.
+    await new Promise(r => setTimeout(r, 700));
+  }
+
+  progWrap.style.display = 'none';
+  await setMeta('lastExportAt', new Date().toISOString());
+  await checkBackupReminder();
+  statusEl.textContent = `Done — exported ${items.length} snag(s) across ${totalBatches} batch ZIP file(s). Select them all together in "Restore from backup" if you ever need to reload them, or send them all to Claude for the final report.`;
+
+  const clearBox = document.getElementById('clearAfterExportBox');
+  const clearText = document.getElementById('clearAfterExportText');
+  if (scope === 'filtered'){
+    clearText.textContent = `These ${items.length} snag(s) matching your last Snag List search are now backed up across ${totalBatches} files. If you're done with them here, you can delete exactly this set from the Snag List tab.`;
+  } else {
+    clearText.textContent = `All ${items.length} snag(s) are now backed up across ${totalBatches} files. To clear everything, go to the Snag List tab, tap "Show every snag anyway", then "Delete all shown".`;
   }
   clearBox.style.display = 'block';
 }
