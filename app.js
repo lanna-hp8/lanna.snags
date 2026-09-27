@@ -2,7 +2,7 @@
 // whether your phone is actually running the latest code, since the old
 // "Rev" line was showing the last-edited-snag time (which is per-device
 // data, not a code version) and was misleading for that purpose.
-const APP_BUILD = 'Build #24';
+const APP_BUILD = 'Build #25';
 
 /* ============================================================
    STORAGE LAYER — IndexedDB.
@@ -148,6 +148,20 @@ async function getPhotoRecord(id){
   });
 }
 async function getAllPhotos(){ return idbGetAll('photos'); }
+async function getPhotoCountForSnag(snagId){
+  // Lightweight — uses the index's own count() so we never pull the actual
+  // photo records (and their full-resolution base64 data) into memory just
+  // to know how many there are. Anywhere that only needs a number (not the
+  // photo content itself) should use this instead of getPhotosForSnag().
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('photos', 'readonly');
+    const idx = tx.objectStore('photos').index('snagId');
+    const req = idx.count(snagId);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
 
 /* Running total of photo storage used (bytes), maintained incrementally
    instead of recomputed by scanning every photo. This used to be the
@@ -1499,12 +1513,12 @@ async function exportCSV(){
   const items = await filteredItemsOrAll();
   if (items.length === 0){ await showAlert('No snags to export.'); return; }
   const headers = ['Tag','Floor','Room','Trade','Severity','Status','Location detail','Description','Comments','Pin count','Photo count','Logged'];
-  const photoCounts = await Promise.all(items.map(i => getPhotosForSnag(i.id)));
+  const photoCounts = await Promise.all(items.map(i => getPhotoCountForSnag(i.id)));
   const rows = items.map((i, idx) => [
     i.tag, FLOORS.find(f => f.code === i.floorCode).name, roomName(i.floorCode, i.roomCode), i.trade,
     i.severity, i.status, i.location || '', i.description || '', i.comments || '',
     (i.pins || []).length,
-    photoCounts[idx].length,
+    photoCounts[idx],
     new Date(i.createdAt).toLocaleDateString('en-GB')
   ]);
   const csv = [headers, ...rows].map(r => r.map(cell => {
