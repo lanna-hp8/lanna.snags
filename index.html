@@ -298,6 +298,11 @@
       <button class="btn" onclick="exportCSV()">⬇ Export CSV</button>
     </div>
     <div class="export-box">
+      <h3>Export data (JSON) — no photos</h3>
+      <p style="margin:0 0 10px;font-size:12.5px;color:var(--text-soft)">Every field for every snag — including pin positions and the correctly-numbered photo filenames — but no actual photo images, so this stays small and fast no matter how large your dataset is. This is the file to send to Claude when updating the website presentation.</p>
+      <button class="btn" onclick="exportDataJSON()">⬇ Export data JSON</button>
+    </div>
+    <div class="export-box">
       <h3>Restore from backup</h3>
       <p style="margin:0 0 10px;font-size:12.5px;color:var(--text-soft)">Select one or more backup ZIPs from a previous export to recreate their snags, pins, and photos here. Nothing already in the app is touched or overwritten — this only adds. Files are read directly from your phone; nothing is uploaded anywhere. If a backup was split into several parts, select them all together.</p>
       <input type="file" accept=".zip" multiple id="importInput" onchange="importBackupFiles(this.files)">

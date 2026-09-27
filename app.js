@@ -2,7 +2,7 @@
 // whether your phone is actually running the latest code, since the old
 // "Rev" line was showing the last-edited-snag time (which is per-device
 // data, not a code version) and was misleading for that purpose.
-const APP_BUILD = 'Build #25';
+const APP_BUILD = 'Build #26';
 
 /* ============================================================
    STORAGE LAYER — IndexedDB.
@@ -1534,6 +1534,45 @@ async function exportCSV(){
 async function filteredItemsOrAll(){
   // On the export tab there are no filters — always all items
   return idbGetAll('snags');
+}
+
+/* Lightweight data-only export — every field the website rebuild needs
+   (including pin coordinates and the deterministically-numbered photo
+   filenames) but never touches actual photo content, so it stays fast and
+   small regardless of dataset size. Filenames are generated the same way
+   runExport() names real files (tag_thumb_N.jpg / tag_full_N.jpg), so this
+   JSON lines up exactly with whatever's already been (or will be) uploaded
+   to photo hosting, even though no photo bytes are read here. */
+async function exportDataJSON(){
+  const items = await idbGetAll('snags');
+  if (items.length === 0){ await showAlert('No snags to export yet.'); return; }
+
+  const photoCounts = await Promise.all(items.map(i => getPhotoCountForSnag(i.id)));
+
+  const jsonRecords = items.map((item, idx) => {
+    const count = photoCounts[idx];
+    const thumbFiles = [];
+    const photoFiles = [];
+    for (let n = 1; n <= count; n++){
+      thumbFiles.push(`photos/${item.tag}_thumb_${n}.jpg`);
+      photoFiles.push(`photos/${item.tag}_full_${n}.jpg`);
+    }
+    return {
+      tag: item.tag, floorCode: item.floorCode, floorName: FLOORS.find(f => f.code === item.floorCode).name,
+      roomCode: item.roomCode, roomName: roomName(item.floorCode, item.roomCode),
+      trade: item.trade, severity: item.severity, status: item.status,
+      location: item.location || '', description: item.description || '', comments: item.comments || '',
+      pins: item.pins || [],
+      thumbFiles, photoFiles,
+      createdAt: item.createdAt, updatedAt: item.updatedAt
+    };
+  });
+
+  const blob = new Blob([JSON.stringify(jsonRecords, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'snag_data.json';
+  a.click();
 }
 
 /* ============================================================
