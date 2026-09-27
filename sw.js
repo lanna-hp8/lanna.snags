@@ -1,4 +1,4 @@
-const CACHE_NAME = 'site-snag-register-v23';
+const CACHE_NAME = 'site-snag-register-v24';
 const CORE_ASSETS = [
   './',
   './index.html',
@@ -46,7 +46,12 @@ self.addEventListener('fetch', (event) => {
     // the very next time you open the app (while still working offline —
     // falls back to whatever was last cached if there's no connection).
     event.respondWith(
-      fetch(event.request).then((res) => {
+      // { cache: 'no-store' } is the actual fix here — without it, "network
+      // first" can still be silently satisfied by the browser's own HTTP
+      // cache (not the service worker's Cache Storage), so a redeploy stays
+      // invisible until that HTTP cache entry expires. This forces every
+      // code/markup request to genuinely hit the network.
+      fetch(event.request, { cache: 'no-store' }).then((res) => {
         if (res.ok){
           const clone = res.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
