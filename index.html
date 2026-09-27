@@ -116,6 +116,13 @@
   .photo-thumb .rm{position:absolute; top:-6px; right:-6px; background:var(--red); color:#fff; border-radius:50%; width:18px; height:18px; font-size:11px; display:flex; align-items:center; justify-content:center; cursor:pointer; border:none;}
   .photo-thumb .full-tag{position:absolute; bottom:-6px; left:-6px; background:var(--green); color:#fff; border-radius:4px; font-size:8px; padding:1px 4px; font-weight:700;}
   .modal-actions{display:flex; justify-content:space-between; gap:10px; margin-top:18px;}
+  .dup-group{border:1px solid var(--line-soft); border-radius:10px; padding:10px 12px; margin-bottom:12px;}
+  .dup-group-tag{font-family:'IBM Plex Mono',monospace; font-size:12.5px; font-weight:700; margin-bottom:8px; color:var(--ink-2);}
+  .dup-item{display:flex; align-items:center; justify-content:space-between; gap:10px; padding:6px 0; border-top:1px solid var(--line-soft);}
+  .dup-item:first-child{border-top:none;}
+  .dup-item-info{font-size:12.5px; line-height:1.45;}
+  .dup-item-info .tag-code{font-weight:700;}
+  .dup-item-info .dup-meta{font-size:11.5px; color:var(--text-soft);}
 
   .plan-subtabs{display:flex; gap:8px; margin-bottom:12px;}
   .plan-subtab-btn{font-family:'IBM Plex Mono',monospace; font-size:12px; font-weight:600; letter-spacing:0.04em; padding:7px 14px; border-radius:20px; border:1px solid var(--line); background:var(--card); color:var(--text-soft); cursor:pointer;}
@@ -281,6 +288,11 @@
       <button class="btn" style="color:var(--red);border-color:var(--red);" onclick="document.querySelector('[data-tab=list]').click()">Go clear it on the Snag List tab</button>
     </div>
     <div class="export-box">
+      <h3>Check for duplicate tags</h3>
+      <p style="margin:0 0 10px;font-size:12.5px;color:var(--text-soft)">If snags from different backups were restored into this copy, two snags can end up sharing the same tag (e.g. two "GF-KIT-01"s). This scans everything currently in the app and lets you rename the later one(s) so every tag is unique — nothing runs automatically, only when you tap this.</p>
+      <button class="btn primary" onclick="checkDuplicateTags()">🔎 Check for duplicate tags</button>
+    </div>
+    <div class="export-box">
       <h3>Quick CSV only</h3>
       <p style="margin:0 0 10px;font-size:12.5px;color:var(--text-soft)">Just the data table, no photos — useful for a quick working punch list.</p>
       <button class="btn" onclick="exportCSV()">⬇ Export CSV</button>
@@ -366,6 +378,22 @@
   <div class="modal" style="max-width:380px;">
     <p id="confirmMessage" style="margin:0 0 18px; font-size:14px; line-height:1.5; color:var(--text);"></p>
     <div id="confirmButtons" style="display:flex; gap:10px; justify-content:flex-end;"></div>
+  </div>
+</div>
+
+<div class="overlay" id="dupTagOverlay">
+  <div class="modal" style="max-width:640px;">
+    <h2 style="font-family:'Space Grotesk',sans-serif; margin:0 0 6px; font-size:18px;">Duplicate tag check</h2>
+    <p id="dupTagSummary" style="font-size:13.5px;color:var(--text);margin:0 0 14px;line-height:1.5;"></p>
+    <div id="dupTagList" style="max-height:55vh;overflow-y:auto;"></div>
+    <div class="modal-actions">
+      <div>
+        <button class="btn primary" id="dupTagFixAllBtn" onclick="fixAllDupTags()" style="display:none;">Rename all automatically</button>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn ghost" onclick="closeDupTagModal()">Close</button>
+      </div>
+    </div>
   </div>
 </div>
 

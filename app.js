@@ -2,7 +2,7 @@
 // whether your phone is actually running the latest code, since the old
 // "Rev" line was showing the last-edited-snag time (which is per-device
 // data, not a code version) and was misleading for that purpose.
-const APP_BUILD = 'Build #22';
+const APP_BUILD = 'Build #23';
 
 /* ============================================================
    STORAGE LAYER — IndexedDB.
@@ -1324,6 +1324,128 @@ async function confirmBulkDelete(){
   await showAlert(`Deleted ${deletedCount} snag(s) and their photos.`);
 }
 
+// --- Duplicate tag check (on-demand only — never runs automatically) ---
+function nextAvailableTag(baseTag, takenTags){
+  // baseTag may already carry a "-B"/"-C" suffix from an earlier fix (or from
+  // the website's own disambiguation) — strip any trailing "-<single letter>"
+  // before generating candidates so we don't end up with "TAG-B-B".
+  const stripped = baseTag.replace(/-[B-Z]$/, '');
+  for (let code = 66; code <= 90; code++){ // 'B'..'Z'
+    const candidate = `${stripped}-${String.fromCharCode(code)}`;
+    if (!takenTags.has(candidate)) return candidate;
+  }
+  // Astronomically unlikely fallback.
+  return `${stripped}-${Date.now()}`;
+}
+
+function computeDuplicateTagGroups(items){
+  const byTag = {};
+  for (const it of items){
+    if (!it.tag) continue;
+    (byTag[it.tag] = byTag[it.tag] || []).push(it);
+  }
+  return Object.keys(byTag)
+    .filter(tag => byTag[tag].length > 1)
+    .map(tag => ({
+      tag,
+      items: byTag[tag].slice().sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))
+    }));
+}
+
+let dupTagGroupsCache = [];
+
+async function checkDuplicateTags(){
+  const items = await idbGetAll('snags');
+  const groups = computeDuplicateTagGroups(items);
+  dupTagGroupsCache = groups;
+
+  if (groups.length === 0){
+    await showAlert('No duplicate tags found — every snag currently has a unique tag.');
+    return;
+  }
+
+  const allTags = new Set(items.map(i => i.tag).filter(Boolean));
+  const dupeCount = groups.reduce((n, g) => n + (g.items.length - 1), 0);
+  document.getElementById('dupTagSummary').textContent =
+    `Found ${groups.length} tag(s) shared by more than one snag (${dupeCount} snag(s) would need renaming). The earliest-logged snag in each group keeps its tag; rename the other(s) below, one at a time or all at once.`;
+
+  const listEl = document.getElementById('dupTagList');
+  listEl.innerHTML = groups.map(group => {
+    const proposals = [];
+    const rows = group.items.map((it, idx) => {
+      const keep = idx === 0;
+      let proposed = '';
+      if (!keep){
+        proposed = nextAvailableTag(group.tag, allTags);
+        allTags.add(proposed); // reserve it so the next row in this group doesn't clash
+        proposals.push({ id: it.id, proposed });
+      }
+      return `
+        <div class="dup-item">
+          <div class="dup-item-info">
+            <span class="tag-code">${keep ? group.tag : proposed}</span>${keep ? ' <span class="dup-meta">(keeps this tag)</span>' : ''}
+            <div class="dup-meta">${escapeHtml(roomName(it.floorCode, it.roomCode) || '')} · logged ${new Date(it.createdAt).toLocaleDateString('en-GB')}</div>
+            <div>${escapeHtml(it.description || '')}</div>
+          </div>
+          ${keep ? '' : `<button class="btn" onclick="renameDupTag(${it.id}, '${proposed}')" id="dupRenameBtn-${it.id}">Rename to ${proposed}</button>`}
+        </div>`;
+    }).join('');
+    return `<div class="dup-group"><div class="dup-group-tag">Tag "${escapeHtml(group.tag)}" — ${group.items.length} snags</div>${rows}</div>`;
+  }).join('');
+
+  document.getElementById('dupTagFixAllBtn').style.display = dupeCount > 0 ? 'inline-block' : 'none';
+  document.getElementById('dupTagOverlay').classList.add('show');
+}
+
+function closeDupTagModal(){
+  document.getElementById('dupTagOverlay').classList.remove('show');
+}
+
+async function renameDupTag(id, newTag){
+  const items = await idbGetAll('snags');
+  const item = items.find(i => i.id === id);
+  if (!item) return;
+  item.tag = newTag;
+  item.updatedAt = new Date().toISOString();
+  await idbPut('snags', item);
+  const btn = document.getElementById(`dupRenameBtn-${id}`);
+  if (btn){
+    btn.textContent = 'Renamed ✓';
+    btn.disabled = true;
+    btn.style.opacity = '0.6';
+    btn.style.pointerEvents = 'none';
+  }
+  await renderAll();
+}
+
+async function fixAllDupTags(){
+  // Re-derive fresh proposals right before applying, in case something in the
+  // list changed since the modal opened (e.g. a rename already done by hand).
+  const items = await idbGetAll('snags');
+  const groups = computeDuplicateTagGroups(items);
+  if (groups.length === 0){
+    closeDupTagModal();
+    await showAlert('Nothing left to rename — all tags are already unique.');
+    return;
+  }
+  const allTags = new Set(items.map(i => i.tag).filter(Boolean));
+  let renamed = 0;
+  for (const group of groups){
+    for (let idx = 1; idx < group.items.length; idx++){
+      const it = group.items[idx];
+      const proposed = nextAvailableTag(group.tag, allTags);
+      allTags.add(proposed);
+      it.tag = proposed;
+      it.updatedAt = new Date().toISOString();
+      await idbPut('snags', it);
+      renamed++;
+    }
+  }
+  closeDupTagModal();
+  await renderAll();
+  await showAlert(`Renamed ${renamed} snag(s) so every tag is now unique.`);
+}
+
 async function quickStatus(id, value){
   const items = await idbGetAll('snags');
   const item = items.find(i => i.id === id);
@@ -1489,7 +1611,7 @@ async function importBackupFiles(fileList){
   }
 
   progFill.style.width = '100%';
-  statusEl.textContent = `Restore complete — ${totalImported} snag(s) recovered${totalFailed ? `, ${totalFailed} failed (see browser console for details)` : ''}.`;
+  statusEl.textContent = `Restore complete — ${totalImported} snag(s) recovered${totalFailed ? `, ${totalFailed} failed (see browser console for details)` : ''}. If you've restored batches from more than one source, it's worth running "Check for duplicate tags" below.`;
   document.getElementById('importInput').value = '';
   await renderAll();
 }
